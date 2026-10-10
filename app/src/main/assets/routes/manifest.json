@@ -1,0 +1,19 @@
+{
+    "license":  "CC0-1.0",
+    "revision":  "5fb1e20746763d206d16c22e3c7b3e558885134e",
+    "source":  "https://github.com/ipverse/country-ip-blocks",
+    "countries":  {
+                      "ru":  {
+                                 "sha256":  "46f6b9ee9361f34244a86cca00b50839eb35357b3b383ebec113b15bd42ae172",
+                                 "prefixes":  10824
+                             },
+                      "ir":  {
+                                 "sha256":  "c32eb4126d4ea9975a9f62129a1d039416998ac5a2e243c6a3c1578a3220e1e0",
+                                 "prefixes":  2318
+                             },
+                      "cn":  {
+                                 "sha256":  "c5b43c10d4ef0f60a8aa759df5a95e3fd3c72e4fd9660d8b056b6de04b7ddf94",
+                                 "prefixes":  7546
+                             }
+                  }
+}

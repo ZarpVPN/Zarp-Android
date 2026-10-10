@@ -50,6 +50,7 @@ fun HomeScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier: Modif
     val results by vm.results.collectAsStateWithLifecycle()
     val strategies by vm.strategies.collectAsStateWithLifecycle()
     val selectedId by vm.selectedId.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val state = status.state
     val busy = state.busy
 
@@ -88,7 +89,7 @@ fun HomeScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier: Modif
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text("Zarp", color = Zc.Text, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            Text(L.t("main.subtitle"), color = Zc.TextDim, fontSize = 14.sp, textAlign = TextAlign.Center)
+            Text(L.t(if (settings?.useProxy == true) "proxy.subtitle" else "main.subtitle"), color = Zc.TextDim, fontSize = 14.sp, textAlign = TextAlign.Center)
 
             if (short) {
                 Spacer(Modifier.height(16.dp))

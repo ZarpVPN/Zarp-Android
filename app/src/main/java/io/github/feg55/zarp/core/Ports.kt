@@ -66,4 +66,13 @@ data class AppSettings(
     val autoConnect: Boolean = false,
     val customStrategies: String = StrategyCatalog.CUSTOM_TEMPLATE,
     val tosAccepted: Boolean = false,
+    val perAppProxy: Boolean = false,
+    val proxyApps: Set<String> = emptySet(),
+    val bypassLan: Boolean = false,
+    val bypassCountries: Set<String> = emptySet(),
+    val customEndpoints: String = "",
+    val strategyCountry: String = "all",
+    val useProxy: Boolean = false,
+    val proxyUri: String = "",
+    val routing: RoutingSettings = RoutingSettings(),
 )

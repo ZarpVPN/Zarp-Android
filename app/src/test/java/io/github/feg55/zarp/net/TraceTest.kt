@@ -74,6 +74,14 @@ class TraceTest {
     }
 
     @Test
+    fun `custom proxy accepts a valid trace with warp off but rejects an empty page`() = runTest {
+        val (clock, fetch) = timed(70, 40) { Trace.parse("ip=203.0.113.7\nwarp=off") }
+        assertEquals(Measurement.Ok(40, "off", firstResponseMs = 70), TraceClient.measureWith(1, clock, false, fetch))
+        val (clock2, empty) = timed(70, 40) { Trace.parse("<html>login</html>") }
+        assertTrue(TraceClient.measureWith(1, clock2, false, empty) is Measurement.NoTraffic)
+    }
+
+    @Test
     fun `failed requests are skipped, all failed means no traffic`() = runTest {
         val (clock, fetch) = timed(10, 10, 10, 10) { k -> if (k < 3) throw IOException("reset $k") else Trace.parse("warp=plus") }
         assertEquals(Measurement.Ok(10, "plus"), TraceClient.measureWith(3, clock, fetch))

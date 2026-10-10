@@ -37,7 +37,7 @@ data class Trace(val fields: Map<String, String>) {
 
 sealed interface Measurement {
     /** Median request time through the tunnel, warp=on|plus confirmed. */
-    data class Ok(val pingMs: Int, val warp: String) : Measurement
+    data class Ok(val pingMs: Int, val warp: String, val firstResponseMs: Int? = null) : Measurement
 
     /** cdn-cgi/trace answered, but not through WARP. */
     data class NotWarp(val warp: String?) : Measurement
@@ -49,6 +49,7 @@ sealed interface Measurement {
 /** Checks a local SOCKS5 proxy (the MASQUE core) against cdn-cgi/trace. */
 interface WarpProbe {
     suspend fun measure(socksPort: Int, samples: Int): Measurement
+    suspend fun measureProxy(socksPort: Int, samples: Int): Measurement = measure(socksPort, samples)
 }
 
 /**
@@ -64,6 +65,9 @@ class TraceClient(
 
     override suspend fun measure(socksPort: Int, samples: Int): Measurement =
         measureWith(samples, clock) { fetch(socksPort) }
+
+    override suspend fun measureProxy(socksPort: Int, samples: Int): Measurement =
+        measureWith(samples, clock, requireWarp = false) { fetch(socksPort) }
 
     /** One request through the SOCKS5 proxy on 127.0.0.1:[socksPort]. */
     suspend fun fetch(socksPort: Int): Trace = withContext(Dispatchers.IO) {
@@ -105,10 +109,14 @@ class TraceClient(
         const val HOST = "www.cloudflare.com"
 
         /** The measuring rules, separate from the network for tests. */
-        suspend fun measureWith(samples: Int, clock: () -> Long, fetch: suspend () -> Trace): Measurement {
+        suspend fun measureWith(samples: Int, clock: () -> Long, fetch: suspend () -> Trace): Measurement =
+            measureWith(samples, clock, true, fetch)
+
+        suspend fun measureWith(samples: Int, clock: () -> Long, requireWarp: Boolean, fetch: suspend () -> Trace): Measurement {
             val times = mutableListOf<Int>()
             var lastError: String? = null
             var warp = "on"
+            var firstResponseMs: Int? = null
             for (i in 0..samples) {
                 coroutineContext.ensureActive()
                 val started = clock()
@@ -119,13 +127,18 @@ class TraceClient(
                     continue
                 }
                 val ms = ((clock() - started) / 1_000_000).toInt()
-                if (!trace.warpOn) return Measurement.NotWarp(trace.warp)
-                warp = trace.warp!!
+                if (requireWarp && !trace.warpOn) return Measurement.NotWarp(trace.warp)
+                if (!requireWarp && trace.fields["ip"].isNullOrBlank()) {
+                    lastError = "trace response has no IP address"
+                    continue
+                }
+                warp = trace.warp ?: "off"
+                if (!requireWarp && firstResponseMs == null) firstResponseMs = ms
                 if (i > 0) times += ms // the first request is a warm-up (DNS inside the tunnel etc.)
             }
             if (times.isEmpty()) return Measurement.NoTraffic(lastError)
             times.sort()
-            return Measurement.Ok(times[times.size / 2], warp)
+            return Measurement.Ok(times[times.size / 2], warp, firstResponseMs)
         }
 
         fun parseHttp(response: String): Trace {

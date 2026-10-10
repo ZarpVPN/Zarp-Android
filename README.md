@@ -13,9 +13,13 @@ One-tap Cloudflare WARP for networks that block it. Android version of [Zarp](ht
 - **One button.** The first tap searches for the fastest working strategy, later taps connect right away.
 - **No WARP app needed.** Zarp talks to WARP itself over MASQUE (HTTP/3, with HTTP/2 as a fallback) and registers a free WARP device on first use.
 - **The same strategies as on Windows.** Fake QUIC Initials of google.com and vk.com are sent from the tunnel's own UDP socket right before the real handshake, so DPI sees them on the same connection.
-- **Honest testing.** Each test runs on a fresh WARP endpoint and every candidate is checked twice. A strategy passes only if `cdn-cgi/trace` reports `warp=on`.
+- **Honest testing.** Every candidate is checked twice. WARP tests rotate endpoints and require `warp=on` or `warp=plus`; imported servers require a valid HTTPS response through that server.
 - **Self-healing.** If the saved strategy stops working, Zarp tries the other verified ones before searching again. After a network change it reconnects and applies the strategy again.
 - **No root.** A regular Android VPN. Strategies that need raw sockets are shown as unsupported instead of being faked.
+- **Per-app proxy.** Settings → Per-app proxy tunnels only selected apps. An empty or uninstalled selection refuses to connect instead of tunneling every app.
+- **Custom servers.** Strategies → Endpoints and protocol accepts numeric WARP endpoints or an imported VLESS, Hysteria2 or Trojan link. Imported servers replace WARP and do not require WARP registration.
+- **Editable routing.** Settings → Routing settings provides LAN/country presets with Direct, Proxy and Block rules. Download GeoIP/GeoSite `.dat` databases from editable HTTPS sources, or use the bundled country IP ranges.
+- **Country filters.** A compact filter button selects All or multiple countries (Russia, Iran, China). Filters apply to the list, quick/full scans and automatic fallback. Direct strategies are hidden and excluded when countries are selected.
 - **Your language.** English, Русский, Español, Português, 中文, हिन्दी, Français and Deutsch. Zarp follows the system language (English if it is not on the list), and the globe button switches it on the fly.
 
 ## Requirements
@@ -30,6 +34,8 @@ One-tap Cloudflare WARP for networks that block it. Android version of [Zarp](ht
 
 The Strategies tab shows every strategy with its result. Tap one to connect with it or test it again, or tick several and test them together. **Quick scan** stops after 3 working strategies (adjustable in Settings), **Full scan** tests all of them.
 
+Connection and routing settings take effect on the next connection. A changed server clears saved test results. Country tags identify candidates to test, not verified country-wide bypasses; providers and DPI deployments differ. See [connection settings](docs/connection-settings.md) for supported links, routing data and limitations.
+
 > [!NOTE]
 > Turn off any other VPN before a search. Android runs one VPN at a time, and a scan through someone else's tunnel measures that tunnel, not your network.
 
@@ -37,10 +43,10 @@ The Strategies tab shows every strategy with its result. Tap one to connect with
 
 | Strategy | Transport | Android |
 |---|---|---|
-| fake google ×3 / ×6 / ×10, fake vk ×6, fakes google + vk | MASQUE / HTTP3 | yes |
+| fake google ×3 / ×6 / ×10 / ×12, fake vk ×6, fakes google + vk | MASQUE / HTTP3 | yes |
 | fake google / vk ttl=4 ×6 | MASQUE / HTTP3 | yes, TTL is lowered for the fakes only |
 | fake google badsum ×6 | MASQUE / HTTP3 | no, needs raw sockets |
-| split 1,midsld and disorder 1,midsld | MASQUE / HTTP2 | yes |
+| split 1,midsld / 1,host / 1,sld / 1,endhost and disorder 1,midsld | MASQUE / HTTP2 | yes |
 | fake md5, seqovl, badseq, hostfakesplit | MASQUE / HTTP2 | no, needs raw sockets |
 | WireGuard strategies | WireGuard | not yet |
 | Direct (no desync) | HTTP3 and HTTP2 | yes, the control test |
@@ -66,11 +72,14 @@ A search runs each strategy on its own tunnel and endpoint and fetches `cdn-cgi/
 
 ### Privacy
 
-Zarp has no telemetry and does not collect personal data. It connects only to:
+Zarp has no telemetry and does not collect personal data. Its connection checks and tunnel setup use:
 
 - `api.cloudflareclient.com`, once, to register a WARP device;
-- WARP MASQUE endpoints (`162.159.198.1`, `162.159.198.2`), which carry the tunnel;
-- `https://www.cloudflare.com/cdn-cgi/trace`, through the tunnel, to check WARP and measure latency.
+- WARP MASQUE endpoints (`162.159.198.1`, `162.159.198.2`, or your custom endpoints), which carry the WARP tunnel;
+- your imported server instead of WARP when that mode is enabled;
+- `https://www.cloudflare.com/cdn-cgi/trace`, through the selected tunnel, to check connectivity and measure latency.
+
+Apps use the configured VPN DNS servers. The optional proxy/routing engine uses the system resolver to find the server and the first configured VPN DNS server through the proxy to resolve destinations. Traffic excluded by app selection or a Direct rule goes directly over the underlying network. With routing rules enabled, ordinary app DNS is also handled by that engine. Explicit GeoIP/GeoSite downloads connect to the URLs selected in routing settings (by default, GitHub release downloads).
 
 WARP is covered by the [Cloudflare WARP privacy policy](https://www.cloudflare.com/application/privacypolicy/).
 
@@ -84,7 +93,7 @@ cd Zarp-Android
 ./gradlew test lint assembleDebug   # app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The Go core is built into `app/libs/zarpcore.aar` by the `buildGoCore` task; its own tests run with `cd core && go test ./zarpcore`. If `dl.google.com` is blocked for you, add `zarp.googleMirror=https://maven.aliyun.com/repository/google` to `local.properties`.
+The Go core is built into `app/libs/zarpcore.aar` by the `buildGoCore` task; its own tests run with `cd core && go test -tags=with_quic,with_utls,http2legacy ./zarpcore`. The `http2legacy` tag retains the x/net/http2 implementation required by sing-box 1.13 on Go 1.27+. If `dl.google.com` is blocked for you, add `zarp.googleMirror=https://maven.aliyun.com/repository/google` to `local.properties`.
 
 Debug builds install next to the release as "Zarp debug" and accept commands over adb, which is handy for testing strategies without tapping:
 
@@ -103,6 +112,6 @@ All strings live in [`app/src/main/assets/lang`](app/src/main/assets/lang), one 
 
 GPL-3.0, see [LICENSE](LICENSE). The Windows Zarp stays under MIT.
 
-Bundled components: [usque](https://github.com/Diniboy1123/usque) (MIT, vendored in `core/third_party/usque`), [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) (MIT), fake packets from [zapret2](https://github.com/bol-van/zapret2) (MIT), plus quic-go, connect-ip-go, wireguard-go and gVisor under their own licenses. License texts are in [`licenses`](licenses).
+Bundled components: [usque](https://github.com/Diniboy1123/usque) (MIT, vendored in `core/third_party/usque`), [hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel) (MIT), [sing-box](https://github.com/SagerNet/sing-box) (GPL-3.0-or-later), country allocations from [ipverse](https://github.com/ipverse/country-ip-blocks) (CC0), fake packets from [zapret2](https://github.com/bol-van/zapret2) (MIT), plus quic-go, connect-ip-go, wireguard-go and gVisor under their own licenses. License texts are in [`licenses`](licenses).
 
 Cloudflare and WARP are trademarks of Cloudflare, Inc. Zarp is an independent project, not affiliated with or endorsed by Cloudflare.

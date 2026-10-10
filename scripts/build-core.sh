@@ -8,4 +8,4 @@ export PATH="$(go env GOPATH)/bin:$PATH"
 go install golang.org/x/mobile/cmd/gomobile golang.org/x/mobile/cmd/gobind
 mkdir -p "$(dirname "$ZARP_CORE_OUT")"
 gomobile bind -target="$ZARP_GO_TARGETS" -androidapi 26 -javapkg io.github.feg55 \
-    -trimpath -ldflags="-s -w" -o "$ZARP_CORE_OUT" ./zarpcore
+    -tags=with_quic,with_utls,http2legacy -trimpath -ldflags="-s -w" -o "$ZARP_CORE_OUT" ./zarpcore

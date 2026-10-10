@@ -66,7 +66,7 @@ class ZarpEngine(
     @Volatile
     private var active: TunnelHandle? = null
 
-    val selected: Strategy? get() = _strategies.value.firstOrNull { it.id == _selectedId.value }
+    val selected: Strategy? get() = candidates().firstOrNull { it.id == _selectedId.value }
 
     /** Quick scan stops after this many working strategies. */
     val quickStopAfter: Int get() = maxOf(1, settings.stopAfterWorking)
@@ -85,7 +85,19 @@ class ZarpEngine(
     }
 
     private fun reloadStrategies() {
-        _strategies.value = StrategyCatalog.load(settings.customStrategies) { log.write(L.t("log.customSkippedApp", it)) }
+        _strategies.value = if (settings.useProxy) StrategyCatalog.forSettings(settings)
+        else StrategyCatalog.load(settings.customStrategies) { log.write(L.t("log.customSkippedApp", it)) }
+    }
+
+    private fun candidates() = StrategyFilter.apply(_strategies.value, settings.strategyCountry)
+
+    /** Refresh saved results without changing the state of a running VPN. */
+    suspend fun refreshSavedState() {
+        _results.value = store.results()
+        _selectedId.value = store.selectedStrategyId()
+        if (active == null && !_status.value.state.busy) {
+            set(EngineState.Idle, selected?.let { Msg("detail.strategy", it.name) } ?: Msg("detail.noStrategy"), strategy = null)
+        }
     }
 
     // ------------------------------------------------------------ top-level scenarios
@@ -104,13 +116,14 @@ class ZarpEngine(
             }
             log.write(L.t("log.verifiedFailed"))
         }
-        searchAndApply(_strategies.value, quickStopAfter, L.t("log.searchQuick", _strategies.value.size, quickStopAfter))
+        val list = candidates()
+        searchAndApply(list, quickStopAfter, L.t("log.searchQuick", list.size, quickStopAfter))
     }
 
     /** Quick scan stops after [quickStopAfter] working strategies; Full scan tests all of them. */
     fun search(full: Boolean): Boolean = launchOp {
         prepare()
-        val list = _strategies.value
+        val list = candidates()
         if (full) searchAndApply(list, 0, L.t("log.searchFull", list.size))
         else searchAndApply(list, quickStopAfter, L.t("log.searchQuick", list.size, quickStopAfter))
     }
@@ -118,11 +131,14 @@ class ZarpEngine(
     /** Test only the given strategies (all of them, no early stop). */
     fun testStrategies(only: List<Strategy>): Boolean = launchOp {
         prepare()
-        searchAndApply(only, 0, L.t("log.searchSelected", only.size))
+        val allowed = candidates().map { it.id }.toSet()
+        val list = only.filter { it.id in allowed }
+        searchAndApply(list, 0, L.t("log.searchSelected", list.size))
     }
 
     /** Connect with a specific strategy and remember it. */
     fun useStrategy(s: Strategy): Boolean = launchOp {
+        require(candidates().any { it.id == s.id }) { L.t("filter.excluded") }
         prepare()
         if (apply(s)) saveSelected(s)
     }
@@ -161,6 +177,8 @@ class ZarpEngine(
                 loaded.await()
                 settings = store.settings()
                 reloadStrategies()
+                _results.value = store.results().filterKeys { id -> _strategies.value.any { it.id == id } }
+                _selectedId.value = store.selectedStrategyId()
                 body()
             } catch (e: CancellationException) {
                 log.write(L.t("log.cancelled"))
@@ -185,10 +203,13 @@ class ZarpEngine(
         set(EngineState.Preparing, Msg("detail.preparing"))
         // our own tunnel and VPN go first: tests must not run through them
         stopAll()
+        if (settings.perAppProxy && settings.proxyApps.isEmpty()) throw VpnStartException(L.t("apps.empty"))
+        EndpointParser.parse(settings.customEndpoints)
         if (network.foreignVpnActive()) {
             log.write(L.t("log.otherVpnActive"))
             log.write(L.t("log.vpnAdvice"))
         }
+        if (settings.useProxy) return
         if (!account.registered) log.write(L.t("log.warpRegistering"))
         try {
             account.ensureRegistered()
@@ -208,7 +229,12 @@ class ZarpEngine(
     internal suspend fun test(s: Strategy): TestResult {
         val now = clock()
         s.plan.unsupported?.let { return TestResult.unsupported(s.id, it, now) }
-        val endpoint = if (settings.isolateTests) endpoints.next(s.transport) else null
+        val custom = EndpointParser.parse(settings.customEndpoints)
+        val endpoint = when {
+            !s.transport.isWarp -> null
+            settings.isolateTests -> endpoints.next(s.transport, custom)
+            else -> custom.firstOrNull()
+        }
         val tunnel = try {
             tunnels.open(s, endpoint, settings.testTimeoutSec * 1000, persistent = false)
         } catch (e: CancellationException) {
@@ -220,9 +246,9 @@ class ZarpEngine(
             return TestResult.failedRaw(s.id, e.message ?: e.javaClass.simpleName, now, endpoint)
         }
         try {
-            return when (val m = probe.measure(tunnel.socksPort, 3)) {
+            return when (val m = measure(s, tunnel.socksPort, 3)) {
                 is Measurement.Ok -> TestResult(
-                    strategyId = s.id, ok = true, connectMs = tunnel.connectMs, pingMs = m.pingMs,
+                    strategyId = s.id, ok = true, connectMs = m.firstResponseMs ?: tunnel.connectMs, pingMs = m.pingMs,
                     endpoint = tunnel.endpoint, timestamp = now,
                 )
                 is Measurement.NotWarp -> TestResult.failed(s.id, Msg("err.notWarp", m.warp ?: "?"), now, tunnel.endpoint)
@@ -278,7 +304,8 @@ class ZarpEngine(
             }
         }
 
-        val confirmed = confirmedStrategies(except = null)
+        val scannedIds = list.map { it.id }.toSet()
+        val confirmed = confirmedStrategies(except = null).filter { it.id in scannedIds }
         if (confirmed.isEmpty()) {
             stopAll()
             log.write(
@@ -298,7 +325,7 @@ class ZarpEngine(
     /** Confirmed strategies, best (lowest score) first. */
     fun confirmedStrategies(except: Strategy?): List<Strategy> {
         val res = _results.value
-        return _strategies.value
+        return candidates()
             .filter { it != except && res[it.id]?.let { r -> r.ok && r.confirmed } == true }
             .sortedBy { res.getValue(it.id).score }
     }
@@ -334,8 +361,10 @@ class ZarpEngine(
         }
 
         val timeoutMs = maxOf(30, settings.testTimeoutSec * 2) * 1000
+        val custom = EndpointParser.parse(settings.customEndpoints)
+        val endpoint = if (s.transport.isWarp) _results.value[s.id]?.endpoint?.takeIf { it in custom } ?: custom.firstOrNull() else null
         val tunnel = try {
-            tunnels.open(s, null, timeoutMs, persistent = true, onStatus = ::onTunnelStatus)
+            tunnels.open(s, endpoint, timeoutMs, persistent = true, onStatus = ::onTunnelStatus)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -344,8 +373,8 @@ class ZarpEngine(
             return false
         }
         val m = try {
-            probe.measure(tunnel.socksPort, 1)
-        } catch (e: CancellationException) {
+            measure(s, tunnel.socksPort, 1)
+        } catch (e: Throwable) {
             tunnel.close()
             throw e
         }
@@ -368,13 +397,17 @@ class ZarpEngine(
             throw if (e is VpnStartException) e else VpnStartException(e.message ?: e.javaClass.simpleName, e)
         }
         active = tunnel
-        log.write(L.t("log.warpConnected", tunnel.connectMs, m.pingMs, tunnel.endpoint))
+        val connectMs = m.firstResponseMs ?: tunnel.connectMs
+        log.write(L.t(if (s.transport.isWarp) "log.warpConnected" else "log.proxyConnected", connectMs, m.pingMs, tunnel.endpoint))
         set(
             EngineState.Connected, Msg("detail.strategy", s.name), strategy = s,
-            connectMs = tunnel.connectMs, pingMs = m.pingMs, endpoint = tunnel.endpoint,
+            connectMs = connectMs, pingMs = m.pingMs, endpoint = tunnel.endpoint,
         )
         return true
     }
+
+    private suspend fun measure(strategy: Strategy, port: Int, samples: Int): Measurement =
+        if (strategy.transport.isWarp) probe.measure(port, samples) else probe.measureProxy(port, samples)
 
     private fun onTunnelStatus(connected: Boolean, message: String) {
         if (active == null) return

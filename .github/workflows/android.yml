@@ -34,8 +34,8 @@ jobs:
         working-directory: core
         run: |
           test -z "$(gofmt -l zarpcore third_party/usque/pub)"
-          go vet ./zarpcore
-          go test ./zarpcore
+          go vet -tags=with_quic,with_utls,http2legacy ./zarpcore
+          go test -tags=with_quic,with_utls,http2legacy ./zarpcore
 
       - name: Unit tests
         run: ./gradlew test --console=plain

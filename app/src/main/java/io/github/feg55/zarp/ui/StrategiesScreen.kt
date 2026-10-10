@@ -12,6 +12,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ButtonDefaults
+import io.github.feg55.zarp.core.StrategyFilter
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -52,6 +63,17 @@ fun StrategiesScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier:
     var checked by remember { mutableStateOf(setOf<String>()) }
     var details by remember { mutableStateOf<Strategy?>(null) }
     val busy = status.state.busy
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    var endpointsOpen by rememberSaveable { mutableStateOf(false) }
+    BackHandler(endpointsOpen) { endpointsOpen = false }
+    if (endpointsOpen) {
+        EndpointsScreen(vm, { endpointsOpen = false }, modifier)
+        return
+    }
+    LaunchedEffect(strategies) {
+        checked = checked.intersect(strategies.map { it.id }.toSet())
+        if (details?.id !in strategies.map { it.id }) details = null
+    }
 
     Box(modifier.fillMaxSize()) {
         LazyColumn(
@@ -59,8 +81,16 @@ fun StrategiesScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier:
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             item {
-                Text(L.t("settings.explain"), color = Zc.TextDim, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp))
+                DarkButton(L.t("endpoint.title"), { endpointsOpen = true }, Modifier.fillMaxWidth())
             }
+            if (settings?.useProxy != true) item {
+                CountryFilter(settings?.strategyCountry ?: "all", enabled = !busy) { country ->
+                    checked = emptySet()
+                    details = null
+                    vm.updateSettings { it.copy(strategyCountry = StrategyFilter.toggle(it.strategyCountry, country)) }
+                }
+            }
+            if (strategies.isEmpty()) item { Text(L.t("filter.empty"), color = Zc.TextDim) }
             items(strategies, key = { it.id }) { s ->
                 StrategyRow(
                     s = s,
@@ -89,6 +119,39 @@ fun StrategiesScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier:
     }
 
     details?.let { s -> StrategyDialog(s, results[s.id], busy, guarded, vm) { details = null } }
+}
+
+@Composable
+private fun CountryFilter(selected: String, enabled: Boolean, onChange: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val countries = StrategyFilter.selected(selected)
+    val label = if (countries.isEmpty()) L.t("country.all")
+        else StrategyFilter.countries.filter { it in countries }.joinToString(", ") { L.t("country.$it") }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Box {
+            OutlinedButton(
+                onClick = { expanded = true }, enabled = enabled,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = Zc.Text),
+                border = BorderStroke(1.dp, if (countries.isEmpty()) Zc.Border else Zc.Accent),
+                shape = RoundedCornerShape(10.dp),
+            ) {
+                Text(label, modifier = Modifier.padding(end = 10.dp))
+                Icon(Icons.Default.FilterList, contentDescription = L.t("filter.title"))
+            }
+            DropdownMenu(expanded = expanded && enabled, onDismissRequest = { expanded = false }, containerColor = Zc.Panel) {
+                StrategyFilter.countries.forEach { country ->
+                    DropdownMenuItem(
+                        text = { Text(L.t("country.$country"), color = Zc.Text) },
+                        leadingIcon = {
+                            Checkbox(checked = if (country == "all") countries.isEmpty() else country in countries,
+                                onCheckedChange = { onChange(country) })
+                        },
+                        onClick = { onChange(country) },
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable

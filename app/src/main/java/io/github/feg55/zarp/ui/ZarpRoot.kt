@@ -52,14 +52,14 @@ fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
     // engine action -> ToS consent (registration) -> VPN permission -> action
     val guarded: (() -> Unit) -> Unit = { action ->
         val run = { withVpnPermission(action) }
-        if (settings?.tosAccepted == true || vm.accountRegistered) run() else pendingTos = run
+        if (settings?.useProxy == true || settings?.tosAccepted == true || vm.accountRegistered) run() else pendingTos = run
     }
 
     // auto-connect once per process start, only when nothing needs the user's answer
     var autoTried by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(settings?.autoConnect) {
         val s = settings ?: return@LaunchedEffect
-        if (!autoTried && s.autoConnect && status.state == EngineState.Idle && (s.tosAccepted || vm.accountRegistered)) {
+        if (!autoTried && s.autoConnect && status.state == EngineState.Idle && (s.useProxy || s.tosAccepted || vm.accountRegistered)) {
             autoTried = true
             withVpnPermission { vm.connect() }
         }

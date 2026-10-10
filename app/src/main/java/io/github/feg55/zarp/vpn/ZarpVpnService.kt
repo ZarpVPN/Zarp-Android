@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -15,6 +16,7 @@ import io.github.feg55.zarp.R
 import io.github.feg55.zarp.ZarpApp
 import io.github.feg55.zarp.core.L
 import io.github.feg55.zarp.core.Msg
+import io.github.feg55.zarp.core.VpnRoutes
 import kotlinx.coroutines.CompletableDeferred
 import java.io.File
 
@@ -44,6 +46,9 @@ class ZarpVpnService : VpnService() {
                         session = intent.getStringExtra(EXTRA_SESSION) ?: "Zarp",
                         dns = intent.getStringExtra(EXTRA_DNS).orEmpty(),
                         ipv6 = intent.getBooleanExtra(EXTRA_IPV6, true),
+                        perApp = intent.getBooleanExtra(EXTRA_PER_APP, false),
+                        apps = intent.getStringArrayListExtra(EXTRA_APPS).orEmpty(),
+                        bypassLan = intent.getBooleanExtra(EXTRA_BYPASS_LAN, false),
                     )
                 }
                 if (result.isFailure) shutdown()
@@ -74,7 +79,7 @@ class ZarpVpnService : VpnService() {
         }
     }
 
-    private fun start(socksPort: Int, session: String, dns: String, ipv6: Boolean) {
+    private fun start(socksPort: Int, session: String, dns: String, ipv6: Boolean, perApp: Boolean, apps: List<String>, bypassLan: Boolean) {
         require(socksPort in 1..65535) { "bad SOCKS port $socksPort" }
         check(tun == null) { "VPN already running" }
 
@@ -82,12 +87,31 @@ class ZarpVpnService : VpnService() {
             .setSession(session)
             .setMtu(MTU)
             .addAddress("10.111.222.1", 32)
-            .addRoute("0.0.0.0", 0)
-            .addDisallowedApplication(packageName)
             .setConfigureIntent(
                 PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
             )
-        if (ipv6) builder.addAddress("fd66:7a61:7270::1", 128).addRoute("::", 0)
+        if (perApp) {
+            var added = 0
+            apps.distinct().filter { it != packageName }.forEach { app ->
+                try {
+                    @Suppress("DEPRECATION")
+                    val info = packageManager.getApplicationInfo(app, 0)
+                    if (info.enabled && info.uid != android.os.Process.myUid()) {
+                        builder.addAllowedApplication(app)
+                        added++
+                    }
+                } catch (_: PackageManager.NameNotFoundException) {
+                    // A selected app may have been uninstalled since the setting was saved.
+                }
+            }
+            // Android treats an empty allowlist as ALL apps. Never establish that accidentally.
+            check(added > 0) { L.t("apps.empty") }
+        } else builder.addDisallowedApplication(packageName)
+        VpnRoutes.internet(ipv6 = false, bypassLan).forEach { builder.addRoute(it.address, it.prefix) }
+        if (ipv6) {
+            builder.addAddress("fd66:7a61:7270::1", 128)
+            VpnRoutes.internet(ipv6 = true, bypassLan).forEach { builder.addRoute(it.address, it.prefix) }
+        }
         dns.split(",").map { it.trim() }.filter { it.isNotEmpty() }.forEach { builder.addDnsServer(it) }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) builder.setMetered(false)
 
@@ -146,7 +170,7 @@ class ZarpVpnService : VpnService() {
         )
         val n = Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_stat_zarp)
             .setColor(0xFFF48120.toInt())
-            .setContentTitle(L.t("notif.title"))
+            .setContentTitle(L.t("notif.proxyTitle"))
             .setContentText(session)
             .setContentIntent(open)
             .setOngoing(true)
@@ -167,6 +191,9 @@ class ZarpVpnService : VpnService() {
         const val EXTRA_SESSION = "session"
         const val EXTRA_DNS = "dns"
         const val EXTRA_IPV6 = "ipv6"
+        const val EXTRA_PER_APP = "per_app"
+        const val EXTRA_APPS = "apps"
+        const val EXTRA_BYPASS_LAN = "bypass_lan"
         private const val CHANNEL = "zarp_vpn"
         private const val NOTIFICATION_ID = 1
         private const val MTU = 8500

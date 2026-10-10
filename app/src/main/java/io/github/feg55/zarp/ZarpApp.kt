@@ -12,8 +12,10 @@ import io.github.feg55.zarp.core.LogBus
 import io.github.feg55.zarp.core.NetworkInspector
 import io.github.feg55.zarp.core.ZarpEngine
 import io.github.feg55.zarp.data.DataStoreZarpStore
+import io.github.feg55.zarp.data.GeoDataRepository
 import io.github.feg55.zarp.masque.MasqueAccount
 import io.github.feg55.zarp.masque.MasqueTunnelFactory
+import io.github.feg55.zarp.masque.ProxyTunnelFactory
 import io.github.feg55.zarp.net.TraceClient
 import io.github.feg55.zarp.strategy.BlobStore
 import io.github.feg55.zarp.vpn.VpnServiceController
@@ -37,6 +39,8 @@ class ZarpApp : Application() {
         private set
     lateinit var engine: ZarpEngine
         private set
+    lateinit var geoData: GeoDataRepository
+        private set
 
     private val uiPrefs by lazy { getSharedPreferences("ui", MODE_PRIVATE) }
 
@@ -55,6 +59,7 @@ class ZarpApp : Application() {
         super.onCreate()
         L.init(open = { assets.open(it) }, setting = uiPrefs.getString(KEY_LANGUAGE, null))
         store = DataStoreZarpStore(this)
+        geoData = GeoDataRepository(this)
         Zarpcore.setLogger { line -> log.write("core: $line") }
 
         val settings = suspend { store.settings() }
@@ -64,7 +69,11 @@ class ZarpApp : Application() {
         engine = ZarpEngine(
             scope = appScope,
             store = store,
-            tunnels = MasqueTunnelFactory(warpConfig.absolutePath, BlobStore { assets.open(it) }, settings, vpn, log),
+            tunnels = ProxyTunnelFactory(
+                MasqueTunnelFactory(warpConfig.absolutePath, BlobStore { assets.open(it) }, settings, vpn, log),
+                settings,
+                routingRules = geoData::compile,
+            ),
             probe = TraceClient(),
             vpn = vpn,
             account = account,

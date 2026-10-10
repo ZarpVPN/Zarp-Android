@@ -7,8 +7,10 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import io.github.feg55.zarp.core.AppSettings
+import io.github.feg55.zarp.core.RoutingSettings
 import io.github.feg55.zarp.core.TestResult
 import io.github.feg55.zarp.core.ZarpStore
 import kotlinx.coroutines.flow.Flow
@@ -38,11 +40,22 @@ class DataStoreZarpStore(context: Context) : ZarpStore {
         val autoConnect = booleanPreferencesKey("auto_connect")
         val custom = stringPreferencesKey("custom_strategies")
         val tos = booleanPreferencesKey("tos_accepted")
+        val perApp = booleanPreferencesKey("per_app_proxy")
+        val apps = stringSetPreferencesKey("proxy_apps")
+        val lan = booleanPreferencesKey("bypass_lan")
+        val countries = stringSetPreferencesKey("bypass_countries")
+        val endpoints = stringPreferencesKey("custom_endpoints")
+        val country = stringPreferencesKey("strategy_country")
+        val useProxy = booleanPreferencesKey("use_proxy")
+        val proxyUri = stringPreferencesKey("proxy_uri")
+        val routing = stringPreferencesKey("routing_json")
     }
 
-    val settingsFlow: Flow<AppSettings> = ds.data.map { p ->
+    val settingsFlow: Flow<AppSettings> = ds.data.map(::readSettings)
+
+    private fun readSettings(p: Preferences): AppSettings {
         val d = AppSettings()
-        AppSettings(
+        return AppSettings(
             testTimeoutSec = p[Keys.timeout] ?: d.testTimeoutSec,
             stopAfterWorking = p[Keys.stopAfter] ?: d.stopAfterWorking,
             isolateTests = p[Keys.isolate] ?: d.isolateTests,
@@ -51,14 +64,27 @@ class DataStoreZarpStore(context: Context) : ZarpStore {
             autoConnect = p[Keys.autoConnect] ?: d.autoConnect,
             customStrategies = p[Keys.custom] ?: d.customStrategies,
             tosAccepted = p[Keys.tos] ?: d.tosAccepted,
+            perAppProxy = p[Keys.perApp] ?: false,
+            proxyApps = p[Keys.apps] ?: emptySet(),
+            bypassLan = p[Keys.lan] ?: false,
+            bypassCountries = p[Keys.countries] ?: emptySet(),
+            customEndpoints = p[Keys.endpoints].orEmpty(),
+            strategyCountry = p[Keys.country] ?: "all",
+            useProxy = p[Keys.useProxy] ?: false,
+            proxyUri = p[Keys.proxyUri].orEmpty(),
+            routing = p[Keys.routing]?.let { RoutingSettings.decode(it) }
+                ?: RoutingSettings.migrate(p[Keys.lan] ?: false, p[Keys.countries] ?: emptySet()),
         )
     }
 
     override suspend fun settings(): AppSettings = settingsFlow.first()
 
-    suspend fun updateSettings(transform: (AppSettings) -> AppSettings) {
-        val s = transform(settings())
+    suspend fun updateSettings(transform: (AppSettings) -> AppSettings): Boolean {
+        var resultsReset = false
         ds.edit { p ->
+            // Transform inside the transaction: fast consecutive app toggles must not overwrite each other.
+            val previous = readSettings(p)
+            val s = transform(previous)
             p[Keys.timeout] = s.testTimeoutSec.coerceIn(5, 120)
             p[Keys.stopAfter] = s.stopAfterWorking.coerceIn(1, 20)
             p[Keys.isolate] = s.isolateTests
@@ -67,7 +93,22 @@ class DataStoreZarpStore(context: Context) : ZarpStore {
             p[Keys.autoConnect] = s.autoConnect
             p[Keys.custom] = s.customStrategies
             p[Keys.tos] = s.tosAccepted
+            p[Keys.perApp] = s.perAppProxy
+            p[Keys.apps] = s.proxyApps
+            p[Keys.lan] = s.bypassLan
+            p[Keys.countries] = s.bypassCountries
+            p[Keys.endpoints] = s.customEndpoints
+            p[Keys.country] = s.strategyCountry
+            p[Keys.useProxy] = s.useProxy
+            p[Keys.proxyUri] = s.proxyUri
+            p[Keys.routing] = RoutingSettings.encode(s.routing)
+            if (previous.customEndpoints != s.customEndpoints || previous.proxyUri != s.proxyUri || previous.useProxy != s.useProxy) {
+                resultsReset = true
+                p.remove(Keys.results)
+                p.remove(Keys.selected)
+            }
         }
+        return resultsReset
     }
 
     override suspend fun results(): Map<String, TestResult> =

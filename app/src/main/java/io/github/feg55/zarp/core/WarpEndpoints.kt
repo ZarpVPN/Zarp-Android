@@ -9,8 +9,10 @@ class WarpEndpoints {
     private var seq = 0
 
     @Synchronized
-    fun next(t: Transport): String {
-        val n = seq++
+    fun next(t: Transport, custom: List<String> = emptyList()): String {
+        val n = seq
+        seq = if (seq == Int.MAX_VALUE) 0 else seq + 1
+        if (custom.isNotEmpty()) return custom[n % custom.size]
         return when (t) {
             Transport.WireGuard ->
                 WIREGUARD_IPS[n % WIREGUARD_IPS.size] + ":" + WIREGUARD_PORTS[n / WIREGUARD_IPS.size % WIREGUARD_PORTS.size]
@@ -18,6 +20,7 @@ class WarpEndpoints {
             Transport.MasqueH2 -> MASQUE_H2_IPS[n % MASQUE_H2_IPS.size] + ":443"
             Transport.MasqueH3 ->
                 MASQUE_IPS[n % MASQUE_IPS.size] + ":" + MASQUE_PORTS[n / MASQUE_IPS.size % MASQUE_PORTS.size]
+            else -> error("Not a WARP transport")
         }
     }
 

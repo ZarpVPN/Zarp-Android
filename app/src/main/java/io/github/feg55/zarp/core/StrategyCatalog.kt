@@ -52,6 +52,15 @@ object StrategyCatalog {
             "--payload=tls_client_hello --lua-desync=multisplit:pos=1,midsld"),
         s("warp-t-disorder", "WARP TLS: disorder 1,midsld", Transport.MasqueH2,
             "--payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld"),
+        // Additional socket-compatible candidates from zapret2's documented split markers.
+        s("warp-t-split-host", "WARP TLS: split 1,host", Transport.MasqueH2,
+            "--payload=tls_client_hello --lua-desync=multisplit:pos=1,host"),
+        s("warp-t-split-sld", "WARP TLS: split 1,sld", Transport.MasqueH2,
+            "--payload=tls_client_hello --lua-desync=multisplit:pos=1,sld"),
+        s("warp-t-split-endhost", "WARP TLS: split 1,endhost", Transport.MasqueH2,
+            "--payload=tls_client_hello --lua-desync=multisplit:pos=1,endhost"),
+        s("warp-q-google12", "WARP QUIC: fake google ×12", Transport.MasqueH3,
+            "--payload=quic_initial --lua-desync=fake:blob=quic_google:repeats=12"),
 
         // ---------- Control: maybe WARP already works on this network ----------
         Strategy(DIRECT_ID, "Direct (no desync)", Transport.MasqueH3, "", nameKey = "strategy.direct"),
@@ -61,7 +70,14 @@ object StrategyCatalog {
     const val DIRECT_ID = "direct"
     const val DIRECT_H2_ID = "direct-h2"
 
-    private fun s(id: String, name: String, t: Transport, args: String) = Strategy(id, name, t, args)
+    private fun s(id: String, name: String, t: Transport, args: String) = Strategy(
+        id, name, t, args,
+        countries = if ("vk" in args) setOf("ru") else setOf("ru", "ir", "cn"),
+    )
+
+    fun forSettings(settings: AppSettings): List<Strategy> = if (settings.useProxy) {
+        listOf(ProxyProfile.parse(settings.proxyUri).strategy())
+    } else load(settings.customStrategies)
 
     /** Built-in + custom strategies (Zarp's strategies.txt format: `Name | transport | args`). */
     fun load(customText: String, onSkipped: (String) -> Unit = {}): List<Strategy> =
@@ -72,7 +88,7 @@ object StrategyCatalog {
         for (raw in text.lines()) {
             val line = raw.trim()
             if (line.isEmpty() || line.startsWith("#")) continue
-            val parts = line.split("|", limit = 3)
+            val parts = line.split("|", limit = 4)
             val t = parts.getOrNull(1)?.let { Transport.parse(it) }
             if (parts.size < 3 || t == null || parts[0].isBlank()) {
                 onSkipped(line)
@@ -85,6 +101,8 @@ object StrategyCatalog {
                 transport = t,
                 args = parts[2].trim(),
                 custom = true,
+                countries = parts.getOrNull(3)?.split(',')?.map { it.trim().lowercase() }
+                    ?.filter { it in StrategyFilter.countries && it != "all" }?.toSet() ?: emptySet(),
             )
         }
         return out.distinctBy { it.id }
@@ -93,6 +111,7 @@ object StrategyCatalog {
     const val CUSTOM_TEMPLATE = """# Custom Zarp strategies. One line = one strategy:
 #   Name | transport | zapret2 profile arguments
 # transport: h3 (MASQUE/QUIC), h2 (MASQUE/TLS)
+# Optional fourth column: ru,ir,cn (country filters)
 # h3: --payload=quic_initial --lua-desync=fake:blob=<blob>:repeats=N[:ip_ttl=N:ip6_ttl=N]
 # h2: --payload=tls_client_hello --lua-desync=multisplit|multidisorder:pos=1,midsld
 # Blobs: quic_google, quic_vk, tls_google, tls_vk, stun_fake, zero64

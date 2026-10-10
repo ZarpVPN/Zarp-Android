@@ -9,7 +9,12 @@ enum class Transport(val title: String, val shortName: String) {
     MasqueH2("MASQUE / HTTP2", "h2"),
 
     /** Classic WireGuard (UDP). Fallback only; not implemented on Android yet. */
-    WireGuard("WireGuard", "wg");
+    WireGuard("WireGuard", "wg"),
+    Vless("VLESS", "vless"),
+    Hysteria2("Hysteria2", "hysteria2"),
+    Trojan("Trojan", "trojan");
+
+    val isWarp: Boolean get() = this in setOf(MasqueH3, MasqueH2, WireGuard)
 
     companion object {
         /** Same aliases as Zarp's Strategy.TryParseTransport. */
@@ -38,6 +43,8 @@ data class Strategy(
     val custom: Boolean = false,
     /** Translation key for names that are translated (the direct strategies). */
     val nameKey: String? = null,
+    /** Candidate regions, not a claim that a strategy works on every ISP there. */
+    val countries: Set<String> = emptySet(),
 ) {
     val name: String get() = nameKey?.let { L.t(it) } ?: title
 

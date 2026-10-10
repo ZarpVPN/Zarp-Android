@@ -27,6 +27,10 @@ class VpnServiceController(
             .putExtra(ZarpVpnService.EXTRA_SESSION, sessionName)
             .putExtra(ZarpVpnService.EXTRA_DNS, s.dns)
             .putExtra(ZarpVpnService.EXTRA_IPV6, s.tunnelIpv6)
+            .putExtra(ZarpVpnService.EXTRA_PER_APP, s.perAppProxy)
+            .putStringArrayListExtra(ZarpVpnService.EXTRA_APPS, ArrayList(s.proxyApps))
+            // Routing now runs in the proxy engine, where block/proxy rules can override LAN.
+            .putExtra(ZarpVpnService.EXTRA_BYPASS_LAN, false)
         ContextCompat.startForegroundService(context, intent)
         val result = withTimeoutOrNull(START_TIMEOUT_MS) { done.await() }
             ?: throw VpnStartException("VPN service did not start in time")

@@ -97,6 +97,61 @@ class ZarpEngineTest {
 
     private val ids = StrategyCatalog.builtIn.map { it.id }
 
+    @Test
+    fun `country filter applies to saved strategies quick scan and confirmed fallback`() = runTest {
+        val env = Env(this, mapOf(
+            "direct" to listOf(Outcome.Works(1, 1)),
+            "warp-q-vk6" to listOf(Outcome.Works(1, 1)),
+            "warp-t-split" to listOf(Outcome.Works(100, 20)),
+        ), AppSettings(strategyCountry = "cn", stopAfterWorking = 1))
+        env.store.selected = "direct"
+        env.store.saved = listOf("direct", "warp-q-vk6").associateWith {
+            TestResult(it, ok = true, confirmed = true, connectMs = 1, pingMs = 1)
+        }
+        env.engine.load()
+        env.engine.connect()
+        advanceUntilIdle()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertEquals("warp-t-split", env.store.selected)
+        assertTrue(env.opened.none { it.strategyId == "direct" || it.strategyId == "warp-q-vk6" })
+    }
+
+    @Test
+    fun `full and selected scans never apply cached results outside their filter`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(1, 1))), AppSettings(strategyCountry = "ir"))
+        env.store.saved = mapOf("direct" to TestResult("direct", ok = true, confirmed = true, connectMs = 1, pingMs = 1))
+        env.engine.load()
+        env.engine.search(full = true)
+        advanceUntilIdle()
+        assertTrue(env.opened.none { it.strategyId == "direct" })
+        assertTrue(env.vpnStarts.isEmpty())
+        env.engine.testStrategies(listOf(StrategyCatalog.builtIn.single { it.id == "direct" }))
+        advanceUntilIdle()
+        assertTrue(env.vpnStarts.isEmpty())
+    }
+
+    @Test
+    fun `custom endpoints are used in tests rechecks and the persistent connection`() = runTest {
+        val env = Env(this, mapOf("warp-q-google6" to listOf(Outcome.Works(100, 20))),
+            AppSettings(customEndpoints = "1.2.3.4:8443\n5.6.7.8:443", stopAfterWorking = 1))
+        env.engine.load()
+        env.engine.search(full = false)
+        advanceUntilIdle()
+        assertEquals(listOf("1.2.3.4:8443", "5.6.7.8:443", "5.6.7.8:443"), env.opened.map { it.endpoint })
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+    }
+
+    @Test
+    fun `empty per-app selection refuses connection before opening any tunnel`() = runTest {
+        val env = Env(this, emptyMap(), AppSettings(perAppProxy = true))
+        env.engine.load()
+        env.engine.connect()
+        advanceUntilIdle()
+        assertEquals(EngineState.Error, env.engine.status.value.state)
+        assertTrue(env.opened.isEmpty())
+        assertTrue(env.vpnStarts.isEmpty())
+    }
+
     @Before
     fun setUp() = TestLang.english()
 
