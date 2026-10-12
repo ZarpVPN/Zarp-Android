@@ -473,7 +473,6 @@ func TestClassifyErrorGivesClassesNotText(t *testing.T) {
 }
 
 func TestTTLProbeAnswers(t *testing.T) {
-	// on unix the sockets of the test process can change their TTL; elsewhere the helper says no
 	udp, tcp := CanSetUDPTTL(), CanSetTCPTTL()
 	if runtime.GOOS == "windows" {
 		if udp || tcp {
@@ -481,7 +480,65 @@ func TestTTLProbeAnswers(t *testing.T) {
 		}
 		return
 	}
-	if !udp || !tcp {
-		t.Fatalf("TTL control: udp %v tcp %v", udp, tcp)
+	// Socket permissions and sandbox policies vary even on Unix. Unsupported is a valid answer.
+	t.Logf("TTL control available: udp %v tcp %v", udp, tcp)
+}
+
+type ttlTestController func(func(uintptr)) error
+
+func (c ttlTestController) Control(fn func(uintptr)) error { return c(fn) }
+
+func TestTTLProbeRejectsFailedSocketControl(t *testing.T) {
+	for name, raw := range map[string]ttlTestController{
+		"control error": func(func(uintptr)) error { return errors.New("socket control denied") },
+		"no callback":   func(func(uintptr)) error { return nil },
+		"invalid socket": func(fn func(uintptr)) error {
+			fn(^uintptr(0))
+			return nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ttlRoundTrip(raw) {
+				t.Fatal("failed socket control was reported as supported")
+			}
+		})
+	}
+}
+
+func TestTTLProbeRestoresSocketTTL(t *testing.T) {
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	raw, err := pc.(*net.UDPConn).SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before int
+	var socketErr error
+	if err := raw.Control(func(fd uintptr) { before, socketErr = getTTL(fd, false) }); err != nil {
+		t.Fatal(err)
+	}
+	if socketErr != nil {
+		t.Skip("socket TTL reading is unavailable on this platform")
+	}
+	// A rejected probe must leave the socket unchanged too.
+	_ = ttlRoundTrip(raw)
+	var after int
+	if err := raw.Control(func(fd uintptr) { after, socketErr = getTTL(fd, false) }); err != nil {
+		t.Fatal(err)
+	}
+	if socketErr != nil {
+		t.Fatal(socketErr)
+	}
+	if after != before {
+		t.Fatalf("TTL probe changed the socket TTL: got %d, want %d", after, before)
+	}
+	if err := pc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if ttlRoundTrip(raw) {
+		t.Fatal("closed socket was reported as supported")
 	}
 }
