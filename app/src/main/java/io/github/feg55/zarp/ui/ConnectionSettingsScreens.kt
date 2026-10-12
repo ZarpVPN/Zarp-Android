@@ -2,6 +2,9 @@ package io.github.feg55.zarp.ui
 
 import android.content.pm.PackageManager
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Surface
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -111,35 +114,97 @@ private fun AppIcon(packageName: String, modifier: Modifier) {
 }
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun EndpointsScreen(vm: MainViewModel, back: () -> Unit, modifier: Modifier = Modifier) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val s = settings ?: return
-    val busy = vm.status.collectAsStateWithLifecycle().value.state.busy
+    val importing by vm.importState.collectAsStateWithLifecycle()
+    val busy = vm.status.collectAsStateWithLifecycle().value.state.busy || importing.loading
     var custom by rememberSaveable(s.customEndpoints) { mutableStateOf(s.customEndpoints) }
     var useProxy by rememberSaveable(s.useProxy) { mutableStateOf(s.useProxy) }
     var uri by rememberSaveable(s.proxyUri) { mutableStateOf(s.proxyUri) }
     val endpointValid = remember(custom) { runCatching { EndpointParser.parse(custom) }.isSuccess }
-    val profile = remember(uri) { runCatching { ProxyProfile.parse(uri) }.getOrNull() }
+    val issue = remember(uri) { Subscription.explainSource(uri) }
+    val subscription = remember(uri) { Subscription.isUrl(uri) }
+    val profiles by vm.serverProfiles.collectAsStateWithLifecycle()
+    val names = remember(profiles) { ServerPairs.names(profiles) }
     val dirty = custom != s.customEndpoints || uri != s.proxyUri || useProxy != s.useProxy
-    Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
-        SettingsHeader(L.t("endpoint.title"), back)
-        SwitchRow(L.t("proxy.enable"), useProxy, { useProxy = it })
-        if (useProxy) {
-            SettingsHint(L.t("proxy.hint"))
-            DarkField(uri, { uri = it }, L.t("proxy.link"), monospace = true, uriInput = true, modifier = Modifier.heightIn(min = 110.dp))
-            if (profile != null) SettingsHint("${profile.transport.title}: ${profile.endpoint}")
-            else if (uri.isNotBlank()) SettingsHint(L.t("proxy.invalid"), error = true)
-        } else {
-            SectionTitle(L.t("endpoint.warp"))
-            SettingsHint(L.t("endpoint.hint"))
-            DarkField(custom, { custom = it }, "IP:port / [IPv6]:port", monospace = true, modifier = Modifier.heightIn(min = 150.dp))
-            if (!endpointValid) SettingsHint(L.t("endpoint.invalid"), error = true)
-            if (custom.isNotBlank()) DarkButton(L.t("endpoint.reset"), { custom = "" }, Modifier.padding(top = 8.dp))
+    val unavailable = s.serverSelectionId != null && profiles.none { it.id == s.serverSelectionId }
+    LazyColumn(modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        item {
+            SettingsHeader(L.t("endpoint.title"), back)
+            SwitchRow(L.t("proxy.enable"), useProxy, { useProxy = it }, enabled = !busy)
+            if (useProxy) {
+                SettingsHint(L.t("proxy.hint"))
+                DarkField(uri, { uri = it.take(16_384) }, L.t("proxy.link"), monospace = true, uriInput = true, modifier = Modifier.heightIn(min = 100.dp))
+                if (issue != null && uri.isNotBlank()) SettingsHint(issue.toString(), error = true)
+                else if (uri.isNotBlank()) SettingsHint(L.t(if (subscription) "proxy.sourceSubscription" else "proxy.sourceLink"))
+                if (importing.loading) SettingsHint(L.t("proxy.subLoading"))
+                importing.error?.let { SettingsHint(it.toString(), error = true) }
+            } else {
+                SectionTitle(L.t("endpoint.warp"))
+                SettingsHint(L.t("endpoint.hint"))
+                DarkField(custom, { custom = it }, "IP:port / [IPv6]:port", monospace = true, modifier = Modifier.heightIn(min = 130.dp))
+                if (!endpointValid) SettingsHint(L.t("endpoint.invalid"), error = true)
+                if (custom.isNotBlank()) DarkButton(L.t("endpoint.reset"), { custom = "" }, enabled = !busy)
+            }
+            if (useProxy) {
+                SectionTitle(L.t("endpoint.warp"))
+                DarkField(custom, {}, "IP:port / [IPv6]:port", monospace = true, enabled = false,
+                    modifier = Modifier.heightIn(min = 70.dp, max = 120.dp))
+                SettingsHint(L.t("server.warpOnly"))
+            }
+            SettingsHint(L.t("endpoint.applies"))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                DarkButton(L.t("btn.save"), { vm.saveSource(uri, custom, useProxy) }, Modifier.weight(1f), primary = true,
+                    enabled = !busy && (dirty || subscription) && (if (useProxy) issue == null else endpointValid))
+                if (importing.loading) DarkButton(L.t("btn.cancel"), vm::cancelImport)
+                else if (s.proxyUri.isNotEmpty()) DarkButton(L.t("proxy.delete"), vm::deleteSource, enabled = !busy)
+            }
+            if (s.useProxy && Subscription.isUrl(s.proxyUri)) {
+                DarkButton(L.t("proxy.refresh"), vm::refreshSource, Modifier.fillMaxWidth(), enabled = !busy && !dirty)
+                s.subscription?.let { cached ->
+                    val time = java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                        .format(java.util.Date(cached.updatedAt))
+                    SettingsHint(L.t("proxy.subStatus", profiles.size, time, cached.unsupported + cached.refused + cached.truncated))
+                }
+            }
+            if (s.useProxy) {
+                SectionTitle(L.t("server.connections"))
+                if (unavailable) SettingsHint(L.t("server.unavailable"), error = true)
+                ConnectionChoice(L.t("server.automatic"), null, s.serverSelectionId, !busy, vm::selectServer)
+            }
         }
-        SettingsHint(L.t("endpoint.applies"))
-        DarkButton(L.t("btn.save"), {
-            vm.updateSettings { it.copy(customEndpoints = custom.trim(), useProxy = useProxy, proxyUri = uri.trim()) }
-        }, Modifier.fillMaxWidth().padding(top = 12.dp), primary = true,
-            enabled = !busy && dirty && endpointValid && (!useProxy || profile != null))
+        if (s.useProxy) items(profiles, key = { it.id }) { profile ->
+            Column {
+                ConnectionChoice(names[profiles.indexOf(profile)], profile.id, s.serverSelectionId, !busy, vm::selectServer)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    ConnectionChip(profile.protocolTitle)
+                    ConnectionChip(L.t(if (profile.outerTransport == Transport.MasqueH3) "server.quic" else "server.tcp"))
+                    ConnectionChip(L.t("server.security." + profile.security))
+                    if (profile.hasEch) ConnectionChip(L.t("server.ech"))
+                }
+                if (!profile.hasTls && !s.allowPlainServer) SettingsHint(L.t("proxy.noHandshake"), error = true)
+                if (!profile.hasTls && s.allowPlainServer) Text(L.t("server.plainOnly"), color = androidx.compose.ui.graphics.Color(0xFFFFC857), fontSize = 13.sp)
+                if (profile.obfuscated) SettingsHint(L.t("server.salamander"))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConnectionChip(text: String) {
+    Surface(color = Zc.Panel, shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, Zc.Border)) {
+        Text(text, color = Zc.TextDim, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+    }
+}
+
+@Composable
+private fun ConnectionChoice(name: String, id: String?, selected: String?, enabled: Boolean, choose: (String?) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        androidx.compose.material3.RadioButton(selected = id == selected, onClick = { choose(id) }, enabled = enabled)
+        androidx.compose.material3.TextButton(onClick = { choose(id) }, enabled = enabled, modifier = Modifier.weight(1f)) {
+            Text(name, color = Zc.Text, fontSize = 15.sp)
+        }
     }
 }

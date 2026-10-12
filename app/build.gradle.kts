@@ -90,6 +90,7 @@ android {
         includeInApk = false
         includeInBundle = false
     }
+    packaging { jniLibs { useLegacyPackaging = true } }
 }
 
 // ---------------------------------------------------------------- Go core (MASQUE)

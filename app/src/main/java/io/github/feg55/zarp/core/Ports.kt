@@ -5,13 +5,21 @@ interface TunnelHandle {
     val connectMs: Int
     val socksPort: Int
     val endpoint: String
+    fun failure(): Msg? = null
+    fun strategyApplied(): Boolean = true
+    fun metrics(): TunnelMetrics? = null
     fun close()
 }
+
+/** Counts only; no destination, credential or payload is exposed. */
+data class TunnelMetrics(val connections: Long, val splits: Long, val fakeFlows: Long, val fakePackets: Long, val foreignConnections: Long)
 
 class TunnelException(message: String, val timeout: Boolean = false) : Exception(message)
 
 /** Opens MASQUE tunnels with a strategy applied to their handshake. */
 interface TunnelFactory {
+    /** Reset per-operation resolution, including failed lookups. */
+    fun beginOperation(settings: AppSettings) = Unit
     /**
      * Connects (blocking up to [timeoutMs]) and returns the tunnel, or throws
      * [TunnelException]. [endpoint] null = account's default endpoint.
@@ -24,6 +32,19 @@ interface TunnelFactory {
         persistent: Boolean,
         onStatus: (connected: Boolean, message: String) -> Unit = { _, _ -> },
     ): TunnelHandle
+}
+
+interface StrategyCapabilities {
+    val udpTtl: Boolean
+    val tcpTtl: Boolean
+}
+
+data class CapabilitySnapshot(override val udpTtl: Boolean = true, override val tcpTtl: Boolean = true) : StrategyCapabilities
+
+/** Foreground lifetime of a scan, independent of the actual VPN adapter. */
+interface OperationLifetime {
+    suspend fun start()
+    suspend fun stop()
 }
 
 /** The Android VPN (TUN + hev-socks5-tunnel) in front of the SOCKS5 proxy. */
@@ -74,5 +95,9 @@ data class AppSettings(
     val strategyCountry: String = "all",
     val useProxy: Boolean = false,
     val proxyUri: String = "",
+    val subscription: SubscriptionSnapshot? = null,
+    /** null means all servers; keep an unavailable id until the user changes it. */
+    val serverSelectionId: String? = null,
+    val allowPlainServer: Boolean = false,
     val routing: RoutingSettings = RoutingSettings(),
 )

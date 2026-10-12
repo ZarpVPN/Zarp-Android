@@ -17,6 +17,7 @@ import org.junit.Test
  * against scripted tunnels. Each strategy's behaviour is a queue of outcomes, one
  * per tunnel opened with it.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class ZarpEngineTest {
     private class InMemoryStore(private val settings: AppSettings) : ZarpStore {
         var saved: Map<String, TestResult> = emptyMap()
@@ -35,7 +36,7 @@ class ZarpEngineTest {
 
     private class Opened(val strategyId: String, val endpoint: String?, val persistent: Boolean, val transport: Transport)
 
-    private class Env(scope: TestScope, private val script: Map<String, List<Outcome>>, settings: AppSettings = AppSettings(tosAccepted = true)) {
+    private class Env(scope: TestScope, private val script: Map<String, List<Outcome>>, settings: AppSettings = AppSettings(tosAccepted = true), foreignVpn: Boolean = false) {
         val opened = mutableListOf<Opened>()
         val vpnStarts = mutableListOf<Int>()
         var vpnStops = 0
@@ -92,10 +93,29 @@ class ZarpEngineTest {
             override suspend fun ensureRegistered() = Unit
         }
 
-        val engine = ZarpEngine(scope, store, tunnels, probe, vpn, account, { false }, LogBus(), clock = { 1000L })
+        val logs = LogBus()
+        val engine = ZarpEngine(scope, store, tunnels, probe, vpn, account, { foreignVpn }, logs, clock = { 1000L })
     }
 
     private val ids = StrategyCatalog.builtIn.map { it.id }
+
+    @Test fun `another VPN warns without refusing WARP scan or connection`() = runTest {
+        val env = Env(this, mapOf("warp-q-google6" to listOf(Outcome.Works(100, 20))),
+            AppSettings(stopAfterWorking = 1), foreignVpn = true)
+        env.engine.load()
+        env.engine.search(full = false)
+        advanceUntilIdle()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertTrue(env.opened.any { !it.persistent })
+        assertEquals(1, env.vpnStarts.size)
+        assertTrue(env.logs.lines.value.any { it.contains(L.t("log.otherVpnActive")) })
+        env.engine.disconnect()
+        advanceUntilIdle()
+        env.engine.connect()
+        advanceUntilIdle()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertEquals(2, env.vpnStarts.size)
+    }
 
     @Test
     fun `country filter applies to saved strategies quick scan and confirmed fallback`() = runTest {
@@ -242,11 +262,11 @@ class ZarpEngineTest {
 
     @Test
     fun `unsupported strategies never open a tunnel`() = runTest {
-        val env = Env(this, emptyMap())
+        val env = Env(this, emptyMap(), AppSettings(customStrategies = "Raw | h3 | --lua-desync=fake:blob=quic_google:badsum"))
         env.engine.load()
         env.engine.search(full = true)
         advanceUntilIdle()
-        val unsupported = StrategyCatalog.builtIn.filter { !it.supported }.map { it.id }.toSet()
+        val unsupported = env.engine.strategies.value.filter { !it.supported }.map { it.id }.toSet()
         assertTrue(unsupported.isNotEmpty())
         assertTrue(env.opened.none { it.strategyId in unsupported })
         unsupported.forEach { assertTrue(env.engine.results.value.getValue(it).unsupported) }

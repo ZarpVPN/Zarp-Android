@@ -1,10 +1,9 @@
 package io.github.feg55.zarp.core
 
 /**
- * Built-in strategies, ported one-to-one from Zarp's StrategyCatalog (Strategy.cs):
- * same ids, names, transports and zapret2 arguments, same order (the search goes
- * top to bottom, most likely first). Strategies that need raw sockets stay in the
- * list and are reported as unsupported instead of being replaced by something else.
+ * Socket-compatible strategies, preserving the desktop ids, arguments and order.
+ * WireGuard and raw injection built-ins are removed. Raw custom profiles remain
+ * visible with their precise unsupported reason; custom WireGuard is skipped.
  *
  * Android additions are HTTP/2 split/disorder variants that work from a normal TCP socket.
  */
@@ -25,28 +24,7 @@ object StrategyCatalog {
             "--payload=quic_initial --lua-desync=fake:blob=quic_google:ip_ttl=4:ip6_ttl=4:repeats=6"),
         s("warp-q-vk-ttl", "WARP QUIC: fake vk ttl=4 ×6", Transport.MasqueH3,
             "--payload=quic_initial --lua-desync=fake:blob=quic_vk:ip_ttl=4:ip6_ttl=4:repeats=6"),
-        s("warp-q-google-bad", "WARP QUIC: fake google badsum ×6", Transport.MasqueH3,
-            "--payload=quic_initial --lua-desync=fake:blob=quic_google:badsum:repeats=6"),
-
-        // ---------- WireGuard (fallback, not implemented on Android yet) ----------
-        s("warp-wg-google6", "WARP WireGuard: fake QUIC google ×6", Transport.WireGuard,
-            "--payload=wireguard_initiation --lua-desync=fake:blob=quic_google:repeats=6"),
-        s("warp-wg-stun", "WARP WireGuard: fake STUN ×6", Transport.WireGuard,
-            "--payload=wireguard_initiation --lua-desync=fake:blob=stun_fake:repeats=6"),
-        s("warp-wg-vk10", "WARP WireGuard: fake QUIC vk ×10", Transport.WireGuard,
-            "--payload=wireguard_initiation --lua-desync=fake:blob=quic_vk:repeats=10"),
-        s("warp-wg-google-ttl", "WARP WireGuard: fake google ttl=4", Transport.WireGuard,
-            "--payload=wireguard_initiation --lua-desync=fake:blob=quic_google:ip_ttl=4:ip6_ttl=4:repeats=6"),
-
         // ---------- MASQUE / HTTP2 (TLS over TCP) ----------
-        s("warp-t-google-md5", "WARP TLS: fake google md5 + split", Transport.MasqueH2,
-            "--payload=tls_client_hello --lua-desync=fake:blob=tls_google:tcp_md5:repeats=6 --lua-desync=multisplit:pos=1,midsld"),
-        s("warp-t-seqovl", "WARP TLS: seqovl google", Transport.MasqueH2,
-            "--payload=tls_client_hello --lua-desync=multisplit:pos=2:seqovl=681:seqovl_pattern=tls_google"),
-        s("warp-t-vk-seq", "WARP TLS: fake vk badseq + disorder", Transport.MasqueH2,
-            "--payload=tls_client_hello --lua-desync=fake:blob=tls_vk:tcp_seq=-3000:repeats=6 --lua-desync=multidisorder:pos=1,midsld"),
-        s("warp-t-hostfake", "WARP TLS: hostfakesplit vk.com", Transport.MasqueH2,
-            "--payload=tls_client_hello --lua-desync=hostfakesplit:host=vk.com:tcp_md5"),
         // Android: no raw sockets, but segmentation of the ClientHello works from a normal socket
         s("warp-t-split", "WARP TLS: split 1,midsld", Transport.MasqueH2,
             "--payload=tls_client_hello --lua-desync=multisplit:pos=1,midsld"),
@@ -76,7 +54,7 @@ object StrategyCatalog {
     )
 
     fun forSettings(settings: AppSettings): List<Strategy> = if (settings.useProxy) {
-        listOf(ProxyProfile.parse(settings.proxyUri).strategy())
+        ServerPairs.build(load(settings.customStrategies), ServerPairs.profiles(settings), settings.allowPlainServer)
     } else load(settings.customStrategies)
 
     /** Built-in + custom strategies (Zarp's strategies.txt format: `Name | transport | args`). */
@@ -85,13 +63,17 @@ object StrategyCatalog {
 
     fun parseCustom(text: String, onSkipped: (String) -> Unit = {}): List<Strategy> {
         val out = mutableListOf<Strategy>()
-        for (raw in text.lines()) {
+        for ((index, raw) in text.lines().withIndex()) {
             val line = raw.trim()
             if (line.isEmpty() || line.startsWith("#")) continue
             val parts = line.split("|", limit = 4)
             val t = parts.getOrNull(1)?.let { Transport.parse(it) }
             if (parts.size < 3 || t == null || parts[0].isBlank()) {
-                onSkipped(line)
+                onSkipped("line " + (index + 1) + ": " + L.t("unsup.syntax", "Name | h2/h3 | arguments"))
+                continue
+            }
+            if (t == Transport.WireGuard) {
+                onSkipped("line " + (index + 1) + ": " + L.t("unsup.wireguard"))
                 continue
             }
             val name = parts[0].trim()

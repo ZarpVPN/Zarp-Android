@@ -1,0 +1,90 @@
+{
+    "host": "server.example.com",
+    "address": "203.0.113.5",
+    "port": 443,
+    "quic": false,
+    "config": {
+        "log": {
+            "disabled": true
+        },
+        "inbounds": [
+            {
+                "type": "socks",
+                "tag": "in",
+                "listen": "127.0.0.1",
+                "listen_port": 0
+            }
+        ],
+        "outbounds": [
+            {
+                "type": "socks",
+                "tag": "proxy",
+                "server": "127.0.0.1",
+                "server_port": 1,
+                "version": "5"
+            },
+            {
+                "type": "direct",
+                "tag": "direct",
+                "domain_resolver": "bootstrap"
+            }
+        ],
+        "dns": {
+            "servers": [
+                {
+                    "type": "local",
+                    "tag": "bootstrap"
+                },
+                {
+                    "type": "udp",
+                    "tag": "remote",
+                    "server": "192.0.2.53",
+                    "detour": "proxy"
+                }
+            ],
+            "final": "remote",
+            "strategy": "prefer_ipv4",
+            "reverse_mapping": false
+        },
+        "route": {
+            "final": "proxy",
+            "default_domain_resolver": "remote",
+            "rules": [
+                {
+                    "domain": [
+                        "www.cloudflare.com"
+                    ],
+                    "outbound": "proxy"
+                }
+            ]
+        }
+    },
+    "xray": {
+        "tag": "server",
+        "protocol": "vless",
+        "settings": {
+            "vnext": [
+                {
+                    "address": "203.0.113.5",
+                    "port": 443,
+                    "users": [
+                        {
+                            "id": "00000000-0000-4000-8000-000000000001",
+                            "encryption": "none",
+                            "flow": ""
+                        }
+                    ]
+                }
+            ]
+        },
+        "streamSettings": {
+            "network": "xhttp",
+            "security": "none",
+            "xhttpSettings": {
+                "path": "/",
+                "mode": "stream-one",
+                "host": "server.example.com"
+            }
+        }
+    }
+}

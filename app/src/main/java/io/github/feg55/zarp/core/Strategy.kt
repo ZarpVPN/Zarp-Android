@@ -45,15 +45,25 @@ data class Strategy(
     val nameKey: String? = null,
     /** Candidate regions, not a claim that a strategy works on every ISP there. */
     val countries: Set<String> = emptySet(),
+    val profile: ProxyProfile? = null,
+    /** Explicitly enabled by the owner/user. Never disguises itself as DPI bypass. */
+    val plain: Boolean = false,
+    val deviceIssue: Msg? = null,
 ) {
     val name: String get() = nameKey?.let { L.t(it) } ?: title
+    val isWarp: Boolean get() = profile == null && transport.isWarp
+    val protocolTitle: String get() = profile?.protocolTitle ?: transport.title
+    val logName: String get() = if (profile == null) name else
+        title.substringBefore(" + ") .let { if (plain) "plain" else it } + " + " + profile.protocolTitle + " [" + profile.id.removePrefix("proxy-").take(8) + "]"
 
     val usesDesync: Boolean get() = args.isNotBlank()
 
     /** Parsed once; unsupported parts are reported, never silently dropped. */
     val plan: DesyncPlan by lazy { ZapretArgs.parse(transport, args) }
 
-    val supported: Boolean get() = plan.unsupported == null
+    val supported: Boolean get() = unsupported == null
+    val unsupported: Msg? get() = deviceIssue ?: plan.unsupported
+        ?: if (profile != null && !plain && (!usesDesync || (transport == Transport.MasqueH2 && !profile.hasTls))) Msg("proxy.noHandshake") else null
 
     override fun toString(): String = name
 }

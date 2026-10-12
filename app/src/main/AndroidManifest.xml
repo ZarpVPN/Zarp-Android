@@ -35,6 +35,14 @@
         </activity>
 
         <service
+            android:name=".vpn.ScanKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-requested VPN connectivity tests and DPI strategy selection before establishing the tunnel" />
+        </service>
+
+        <service
             android:name=".vpn.ZarpVpnService"
             android:exported="false"
             android:foregroundServiceType="specialUse"

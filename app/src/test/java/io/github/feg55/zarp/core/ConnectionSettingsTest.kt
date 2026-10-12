@@ -102,7 +102,8 @@ class ConnectionSettingsTest {
         assertEquals("proxy.example:443", hy2.endpoint)
         val vless = ProxyProfile.parse("vless://00000000-0000-4000-8000-000000000001@proxy.example:443?security=tls&type=ws&path=%2Fsocket&host=front.example")
         assertTrue(vless.outbound.toString().contains("/socket"))
-        assertTrue(StrategyFilter.matches(vless.strategy(), "cn"))
+        assertFalse(StrategyFilter.matches(vless.strategy(), "cn"))
+        assertTrue(ServerPairs.build(StrategyCatalog.builtIn, listOf(vless)).all { StrategyFilter.matches(it, "cn") })
         listOf("trojan://my-secret@host:99999", "trojan://my-secret@host:443?type=xhttp", "vless://bad@host:443", "https://my-secret@host:443").forEach {
             assertEquals("proxy.invalid", runCatching { ProxyProfile.parse(it) }.exceptionOrNull()?.message)
         }

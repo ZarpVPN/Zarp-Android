@@ -1,8 +1,7 @@
 package io.github.feg55.zarp.net
 
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -13,6 +12,9 @@ import java.util.UUID
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
+import kotlin.concurrent.thread
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.coroutineContext
 
 /** Parsed https://www.cloudflare.com/cdn-cgi/trace response. */
@@ -50,6 +52,8 @@ sealed interface Measurement {
 interface WarpProbe {
     suspend fun measure(socksPort: Int, samples: Int): Measurement
     suspend fun measureProxy(socksPort: Int, samples: Int): Measurement = measure(socksPort, samples)
+    /** Exactly one HTTPS request before spending time on latency samples. */
+    suspend fun probeProxy(socksPort: Int): Measurement = measureProxy(socksPort, 0)
 }
 
 /**
@@ -70,25 +74,35 @@ class TraceClient(
         measureWith(samples, clock, requireWarp = false) { fetch(socksPort) }
 
     /** One request through the SOCKS5 proxy on 127.0.0.1:[socksPort]. */
-    suspend fun fetch(socksPort: Int): Trace = withContext(Dispatchers.IO) {
-        Socket().use { raw ->
-            raw.soTimeout = timeoutMs
-            raw.connect(InetSocketAddress("127.0.0.1", socksPort), timeoutMs)
-            Socks5.connect(raw.getInputStream(), raw.getOutputStream(), host, 443)
-            val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
-            (factory.createSocket(raw, host, 443, true) as SSLSocket).use { tls ->
-                tls.soTimeout = timeoutMs
-                tls.startHandshake()
-                if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(host, tls.session)) {
-                    throw IOException("certificate does not match $host")
+    suspend fun fetch(socksPort: Int): Trace = suspendCancellableCoroutine { continuation ->
+        val raw = Socket()
+        continuation.invokeOnCancellation { runCatching { raw.close() } }
+        thread(name = "zarp-probe", isDaemon = true) {
+            try {
+                val trace = raw.use {
+                    if (!continuation.isActive) throw IOException("request cancelled")
+                    raw.soTimeout = timeoutMs
+                    raw.connect(InetSocketAddress("127.0.0.1", socksPort), timeoutMs)
+                    Socks5.connect(raw.getInputStream(), raw.getOutputStream(), host, 443)
+                    val factory = SSLSocketFactory.getDefault() as SSLSocketFactory
+                    (factory.createSocket(raw, host, 443, true) as SSLSocket).use { tls ->
+                        tls.soTimeout = timeoutMs
+                        tls.startHandshake()
+                        if (!HttpsURLConnection.getDefaultHostnameVerifier().verify(host, tls.session)) {
+                            throw IOException("certificate does not match $host")
+                        }
+                        val path = "/cdn-cgi/trace?" + UUID.randomUUID().toString().replace("-", "")
+                        val req = "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: Zarp-Android/1.0\r\n" +
+                            "Accept: */*\r\nConnection: close\r\n\r\n"
+                        tls.outputStream.write(req.toByteArray(Charsets.US_ASCII))
+                        tls.outputStream.flush()
+                        val response = readAll(tls.inputStream).toString(Charsets.UTF_8)
+                        parseHttp(response)
+                    }
                 }
-                val path = "/cdn-cgi/trace?" + UUID.randomUUID().toString().replace("-", "")
-                val req = "GET $path HTTP/1.1\r\nHost: $host\r\nUser-Agent: Zarp-Android/1.0\r\n" +
-                    "Accept: */*\r\nConnection: close\r\n\r\n"
-                tls.outputStream.write(req.toByteArray(Charsets.US_ASCII))
-                tls.outputStream.flush()
-                val response = readAll(tls.inputStream).toString(Charsets.UTF_8)
-                parseHttp(response)
+                if (continuation.isActive) continuation.resume(trace)
+            } catch (e: Exception) {
+                if (continuation.isActive) continuation.resumeWithException(e)
             }
         }
     }
@@ -134,7 +148,7 @@ class TraceClient(
                 }
                 warp = trace.warp ?: "off"
                 if (!requireWarp && firstResponseMs == null) firstResponseMs = ms
-                if (i > 0) times += ms // the first request is a warm-up (DNS inside the tunnel etc.)
+                if (i > 0 || samples == 0) times += ms // the first measurement request is a warm-up
             }
             if (times.isEmpty()) return Measurement.NoTraffic(lastError)
             times.sort()

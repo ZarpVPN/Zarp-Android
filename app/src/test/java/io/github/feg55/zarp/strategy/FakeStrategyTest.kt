@@ -2,6 +2,8 @@ package io.github.feg55.zarp.strategy
 
 import io.github.feg55.zarp.core.Blob
 import io.github.feg55.zarp.core.StrategyCatalog
+import io.github.feg55.zarp.core.Strategy
+import io.github.feg55.zarp.core.Transport
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -110,6 +112,7 @@ class FakeStrategyTest {
 
     @Test(expected = UnsupportedStrategyException::class)
     fun `badsum is refused`() {
-        strategy("warp-q-google-bad")
+        ZarpStrategies.forStrategy(Strategy("custom-raw", "Raw", Transport.MasqueH3,
+            "--lua-desync=fake:blob=quic_google:badsum"), blobs)
     }
 }

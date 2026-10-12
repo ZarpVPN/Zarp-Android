@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -71,6 +72,11 @@ func splitPositions(data []byte, pos []string, host string) []int {
 	if host != "" {
 		hostAt = bytes.Index(data, []byte(host))
 	}
+	return positionsAt(data, pos, hostAt, host)
+}
+
+// positionsAt is splitPositions for a host name already located at hostAt (-1: not in the payload).
+func positionsAt(data []byte, pos []string, hostAt int, host string) []int {
 	sldAt, sldLen := -1, 0
 	if hostAt >= 0 {
 		labels := strings.Split(host, ".")
@@ -135,18 +141,25 @@ func (c *desyncConn) Write(b []byte) (int, error) {
 	if len(parts) == 0 {
 		return c.TCPConn.Write(b)
 	}
-	if err := c.TCPConn.SetNoDelay(true); err != nil {
+	return sendSegments(c.TCPConn, c.spec.mode, b, parts)
+}
+
+// sendSegments writes b as several TCP segments cut at the given offsets (sorted, strictly inside b). With
+// desyncDisorder the first segment leaves with TTL 1 and is lost on the first hop, so it reaches the server
+// only when the kernel retransmits it, after the rest.
+func sendSegments(conn segmentConn, mode desyncMode, b []byte, parts []int) (int, error) {
+	if err := conn.SetNoDelay(true); err != nil {
 		return 0, err
 	}
 	prev := 0
 	written := 0
 	for i, end := range append(parts, len(b)) {
 		seg := b[prev:end]
-		if i == 0 && c.spec.mode == desyncDisorder {
-			if err := c.writeLowTTL(seg); err != nil {
+		if i == 0 && mode == desyncDisorder {
+			if err := writeLowTTL(conn, seg); err != nil {
 				return written, err
 			}
-		} else if _, err := c.TCPConn.Write(seg); err != nil {
+		} else if _, err := conn.Write(seg); err != nil {
 			return written, err
 		}
 		written += len(seg)
@@ -157,12 +170,21 @@ func (c *desyncConn) Write(b []byte) (int, error) {
 	return written, nil
 }
 
-func (c *desyncConn) writeLowTTL(seg []byte) error {
-	raw, err := c.TCPConn.SyscallConn()
+// segmentConn is the part of *net.TCPConn that sendSegments needs; the tests substitute a recorder.
+type segmentConn interface {
+	Write([]byte) (int, error)
+	SetNoDelay(bool) error
+	SyscallConn() (syscall.RawConn, error)
+	RemoteAddr() net.Addr
+}
+
+func writeLowTTL(conn segmentConn, seg []byte) error {
+	raw, err := conn.SyscallConn()
 	if err != nil {
 		return err
 	}
-	v6 := c.TCPConn.RemoteAddr().(*net.TCPAddr).IP.To4() == nil
+	addr, _ := conn.RemoteAddr().(*net.TCPAddr)
+	v6 := addr != nil && addr.IP.To4() == nil
 	var old int
 	var serr error
 	if err := raw.Control(func(fd uintptr) { old, serr = getTTL(fd, v6) }); err != nil {
@@ -177,7 +199,7 @@ func (c *desyncConn) writeLowTTL(seg []byte) error {
 	if serr != nil {
 		return serr
 	}
-	_, werr := c.TCPConn.Write(seg)
+	_, werr := conn.Write(seg)
 	if err := raw.Control(func(fd uintptr) { serr = setTTL(fd, v6, old) }); err != nil {
 		return err
 	}

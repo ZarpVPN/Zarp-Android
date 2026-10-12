@@ -499,7 +499,7 @@ While the tool won't be able to log you in to ZeroTrust *(as SSO is required for
 Warp to warp communication is supported by all modes of this tool if you have it [correctly set up](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/private-net/warp-to-warp/). Proxies and tunnels can reach services exposed on other devices and [port forwarding](#port-forwarding-mode-for-advanced-users-cross-platform) can be used to forward ports to and from the WARP network.
 
 > [!TIP]
-> These tunnels seem to access the better-routed `warp=plus` network. However, once Proxy is enabled—which is required for Warp-to-Warp communication—the connection is downgraded to `warp=on`. This results in degraded *(athough usually still quite generous)* performance.
+> These tunnels seem to access the better-routed `warp=plus` network. However, once Proxy is enabled (which is required for Warp-to-Warp communication) the connection is downgraded to `warp=on`. This results in degraded *(athough usually still quite generous)* performance.
 
 > [!TIP]
 > By default Cloudflare logs most requests. You might want to turn that off to preserve the uncertain belief of a little more privacy. 👀

@@ -51,7 +51,11 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         NumberSlider(L.t("opt.stopAfter").replace('\n', ' '), s.stopAfterWorking, 1..10) { v ->
             vm.updateSettings { it.copy(stopAfterWorking = v) }
         }
-        SwitchRow(L.t("opt.isolate"), s.isolateTests, { v -> vm.updateSettings { it.copy(isolateTests = v) } })
+        SwitchRow(L.t("opt.isolate"), s.isolateTests, { v -> vm.updateSettings { it.copy(isolateTests = v) } }, enabled = !s.useProxy)
+        if (s.useProxy) SettingsHint(L.t("server.warpOnly"))
+        SwitchRow(L.t("server.allowPlain"), s.allowPlainServer, { v -> vm.updateSettings { it.copy(allowPlainServer = v) } }, enabled = !busy && s.useProxy)
+        if (s.useProxy) SettingsHint(L.t("server.plainHint"))
+        if (s.allowPlainServer && s.useProxy) Text(L.t("server.plainOnly"), color = androidx.compose.ui.graphics.Color(0xFFFFC857), fontSize = 13.sp)
 
         SectionTitle(L.t("settings.connection"))
         DarkButton(L.t("apps.title"), { page = "apps" }, Modifier.fillMaxWidth())
@@ -93,9 +97,11 @@ fun DarkField(
     singleLine: Boolean = false,
     monospace: Boolean = false,
     uriInput: Boolean = false,
+    enabled: Boolean = true,
 ) {
     OutlinedTextField(
         value = value,
+        enabled = enabled,
         onValueChange = onChange,
         label = label?.let { { Text(it) } },
         singleLine = singleLine,

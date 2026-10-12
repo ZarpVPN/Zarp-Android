@@ -15,13 +15,13 @@ class ResultsTest {
     @Test
     fun `confirmed merge takes slower connect and average ping`() {
         val r1 = TestResult("a", ok = true, connectMs = 400, pingMs = 60, timestamp = 1)
-        val r2 = TestResult("a", ok = true, connectMs = 700, pingMs = 40, endpoint = "162.159.198.2:500", timestamp = 2)
+        val r2 = TestResult("a", ok = true, connectMs = 700, pingMs = 40, endpoint = "192.0.2.2:500", timestamp = 2)
         val m = TestResult.confirmed(r1, r2)
         assertTrue(m.ok && m.confirmed)
         assertEquals(700, m.connectMs)
         assertEquals(50, m.pingMs)
         assertEquals(2L, m.timestamp)
-        assertEquals("162.159.198.2:500", m.endpoint)
+        assertEquals("192.0.2.2:500", m.endpoint)
     }
 
     @Test

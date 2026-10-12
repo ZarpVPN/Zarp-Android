@@ -17,9 +17,9 @@ class StrategyTest {
     fun `catalog keeps Zarp ids and order`() {
         val zarpOrder = listOf(
             "warp-q-google6", "warp-q-google3", "warp-q-vk6", "warp-q-google-vk", "warp-q-google10",
-            "warp-q-google-ttl", "warp-q-vk-ttl", "warp-q-google-bad",
-            "warp-wg-google6", "warp-wg-stun", "warp-wg-vk10", "warp-wg-google-ttl",
-            "warp-t-google-md5", "warp-t-seqovl", "warp-t-vk-seq", "warp-t-hostfake",
+            "warp-q-google-ttl", "warp-q-vk-ttl",
+            "warp-t-split", "warp-t-disorder", "warp-t-split-host", "warp-t-split-sld", "warp-t-split-endhost",
+            "warp-q-google12", "direct", "direct-h2",
         )
         val ids = StrategyCatalog.builtIn.map { it.id }
         assertEquals(zarpOrder, ids.filter { it in zarpOrder })
@@ -43,15 +43,14 @@ class StrategyTest {
 
     @Test
     fun `strategies needing raw sockets are unsupported, not replaced`() {
-        val badsum = byId("warp-q-google-bad")
+        val badsum = Strategy("custom-badsum", "badsum", Transport.MasqueH3, "--lua-desync=fake:blob=quic_google:badsum")
         assertTrue(badsum.plan.unsupportedReason!!.contains("badsum"))
         assertTrue(badsum.plan.fakes.isEmpty())
-        for (id in listOf("warp-t-google-md5", "warp-t-seqovl", "warp-t-vk-seq", "warp-t-hostfake")) {
-            assertNotNull(id, byId(id).plan.unsupportedReason)
+        for (args in listOf("fake:blob=tls_google:tcp_md5", "multisplit:pos=2:seqovl=681", "fake:blob=tls_vk:tcp_seq=-3000", "hostfakesplit:host=example.com:tcp_md5")) {
+            assertNotNull(args, ZapretArgs.parse(Transport.MasqueH2, "--lua-desync=$args").unsupportedReason)
         }
-        StrategyCatalog.builtIn.filter { it.transport == Transport.WireGuard }.forEach {
-            assertNotNull(it.plan.unsupportedReason)
-        }
+        assertTrue(StrategyCatalog.builtIn.all { it.supported && it.transport != Transport.WireGuard })
+        assertTrue(StrategyCatalog.parseCustom("Removed | wg | --lua-desync=fake:blob=zero64").isEmpty())
     }
 
     @Test
@@ -97,7 +96,8 @@ class StrategyTest {
         assertEquals("★ My QUIC", list[0].name)
         assertEquals(listOf(FakeStep(Blob.QuicGoogle, 8)), list[0].plan.fakes)
         assertEquals("split:2", list[1].plan.tcpDesync)
-        assertEquals(listOf("broken line"), skipped)
+        assertEquals(1, skipped.size)
+        assertTrue(skipped.single().contains("line 3"))
         assertTrue(StrategyCatalog.parseCustom(StrategyCatalog.CUSTOM_TEMPLATE).isEmpty())
     }
 

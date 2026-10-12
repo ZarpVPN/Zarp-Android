@@ -45,6 +45,9 @@ class ZarpEngine(
     private val log: LogBus,
     private val endpoints: WarpEndpoints = WarpEndpoints(),
     private val clock: () -> Long = System::currentTimeMillis,
+    private val refreshServers: suspend (AppSettings) -> AppSettings = { it },
+    private val capabilities: StrategyCapabilities = CapabilitySnapshot(),
+    private val lifetime: OperationLifetime? = null,
 ) {
     private val _status = MutableStateFlow(EngineStatus())
     val status: StateFlow<EngineStatus> = _status.asStateFlow()
@@ -57,11 +60,14 @@ class ZarpEngine(
 
     private val _selectedId = MutableStateFlow<String?>(null)
     val selectedId: StateFlow<String?> = _selectedId.asStateFlow()
+    private val _activePair = MutableStateFlow<Strategy?>(null)
+    val activePair: StateFlow<Strategy?> = _activePair.asStateFlow()
 
     private val busy = Mutex()
     private val loaded = CompletableDeferred<Unit>()
     private var job: Job? = null
-    private var settings = AppSettings()
+    @Volatile private var settings = AppSettings()
+    val serverMode: Boolean get() = settings.useProxy || _activePair.value?.profile != null
 
     @Volatile
     private var active: TunnelHandle? = null
@@ -78,23 +84,47 @@ class ZarpEngine(
         // results of strategies that no longer exist are dropped, as in Zarp
         val known = _strategies.value.map { it.id }.toSet()
         _results.value = store.results().filterKeys { it in known }
-        _selectedId.value = store.selectedStrategyId()
+        _selectedId.value = store.selectedStrategyId()?.takeIf { it in known }
+        store.saveResults(_results.value)
+        store.setSelectedStrategyId(_selectedId.value)
         val s = selected
         set(EngineState.Idle, if (s != null) Msg("detail.strategy", s.name) else Msg("detail.noStrategy"))
         loaded.complete(Unit)
     }
 
     private fun reloadStrategies() {
-        _strategies.value = if (settings.useProxy) StrategyCatalog.forSettings(settings)
-        else StrategyCatalog.load(settings.customStrategies) { log.write(L.t("log.customSkippedApp", it)) }
+        val catalog = StrategyCatalog.load(settings.customStrategies) { log.write(L.t("log.customSkippedApp", it)) }
+        _strategies.value = (if (settings.useProxy) ServerPairs.build(catalog, ServerPairs.profiles(settings), settings.allowPlainServer) else catalog)
+            .map(::withCapabilities)
     }
 
-    private fun candidates() = StrategyFilter.apply(_strategies.value, settings.strategyCountry)
+    fun withCapabilities(strategy: Strategy): Strategy {
+        val issue = when {
+            !capabilities.udpTtl && strategy.plan.fakes.any { it.ipTtl != null || it.ip6Ttl != null } -> Msg("unsup.udpTtl")
+            !capabilities.tcpTtl && strategy.plan.tcpDesync?.startsWith("disorder:") == true -> Msg("unsup.tcpTtl")
+            else -> null
+        }
+        return strategy.copy(deviceIssue = issue)
+    }
+
+    private fun candidates() = StrategyFilter.apply(_strategies.value, settings.strategyCountry).filter {
+        !settings.useProxy || settings.serverSelectionId == null || it.profile?.id == settings.serverSelectionId
+    }
+
+    private suspend fun pruneSavedState() {
+        val known = _strategies.value.map { it.id }.toSet()
+        _results.value = store.results().filterKeys { it in known }
+        _selectedId.value = store.selectedStrategyId()?.takeIf { it in known }
+        store.saveResults(_results.value)
+        store.setSelectedStrategyId(_selectedId.value)
+    }
 
     /** Refresh saved results without changing the state of a running VPN. */
     suspend fun refreshSavedState() {
-        _results.value = store.results()
-        _selectedId.value = store.selectedStrategyId()
+        if (busy.isLocked) return
+        settings = store.settings()
+        reloadStrategies()
+        pruneSavedState()
         if (active == null && !_status.value.state.busy) {
             set(EngineState.Idle, selected?.let { Msg("detail.strategy", it.name) } ?: Msg("detail.noStrategy"), strategy = null)
         }
@@ -111,10 +141,11 @@ class ZarpEngine(
             markFailed(s)
             val others = confirmedStrategies(except = s)
             if (others.isNotEmpty()) {
-                log.write(L.t("log.savedFailed", s.name))
+                log.write(L.t("log.savedFailed", s.logName))
                 if (applyFirstWorking(others)) return@launchOp
             }
             log.write(L.t("log.verifiedFailed"))
+            if (settings.useProxy && candidates().size <= 1) return@launchOp
         }
         val list = candidates()
         searchAndApply(list, quickStopAfter, L.t("log.searchQuick", list.size, quickStopAfter))
@@ -138,9 +169,9 @@ class ZarpEngine(
 
     /** Connect with a specific strategy and remember it. */
     fun useStrategy(s: Strategy): Boolean = launchOp {
-        require(candidates().any { it.id == s.id }) { L.t("filter.excluded") }
         prepare()
-        if (apply(s)) saveSelected(s)
+        val current = candidates().firstOrNull { it.id == s.id } ?: throw ZarpException(Msg("filter.excluded"))
+        if (apply(current)) saveSelected(current)
     }
 
     fun disconnect(): Boolean = launchOp {
@@ -162,6 +193,7 @@ class ZarpEngine(
                 val had = active != null
                 active?.close()
                 active = null
+                _activePair.value = null
                 if (had) {
                     log.write(reason.toString())
                     set(EngineState.Idle, reason)
@@ -177,19 +209,21 @@ class ZarpEngine(
                 loaded.await()
                 settings = store.settings()
                 reloadStrategies()
-                _results.value = store.results().filterKeys { id -> _strategies.value.any { it.id == id } }
-                _selectedId.value = store.selectedStrategyId()
+                pruneSavedState()
+                lifetime?.start()
                 body()
             } catch (e: CancellationException) {
                 log.write(L.t("log.cancelled"))
-                withContext(NonCancellable) { stopAll() }
+                withContext(NonCancellable) { saveResults(); stopAll() }
                 set(EngineState.Idle, Msg("detail.cancelled"))
             } catch (e: Exception) {
-                val msg = (e as? ZarpException)?.msg ?: Msg("detail.error", e.message ?: e.javaClass.simpleName)
+                val msg = (e as? ZarpException)?.msg ?: if (settings.useProxy) ServerErrors.describe("", e.message.orEmpty())
+                    else Msg("detail.error", e.message ?: e.javaClass.simpleName)
                 log.write(L.t("log.error", msg.toString()))
                 withContext(NonCancellable) { stopAll() }
                 set(EngineState.Error, msg)
             } finally {
+                withContext(NonCancellable) { runCatching { lifetime?.stop() } }
                 _status.update { it.copy(progressDone = 0, progressTotal = 0) }
                 busy.unlock()
             }
@@ -204,12 +238,28 @@ class ZarpEngine(
         // our own tunnel and VPN go first: tests must not run through them
         stopAll()
         if (settings.perAppProxy && settings.proxyApps.isEmpty()) throw VpnStartException(L.t("apps.empty"))
-        EndpointParser.parse(settings.customEndpoints)
         if (network.foreignVpnActive()) {
+            if (settings.useProxy) throw ZarpException(Msg("server.otherVpn"))
             log.write(L.t("log.otherVpnActive"))
-            log.write(L.t("log.vpnAdvice"))
         }
-        if (settings.useProxy) return
+        if (settings.useProxy) {
+            Subscription.explainSource(settings.proxyUri)?.let { throw ZarpException(it) }
+            settings = refreshServers(settings)
+            reloadStrategies()
+            pruneSavedState()
+            val profiles = ServerPairs.profiles(settings)
+            if (settings.serverSelectionId != null && profiles.none { it.id == settings.serverSelectionId }) {
+                throw ZarpException(Msg("server.unavailable"))
+            }
+            val chosen = profiles.filter { settings.serverSelectionId == null || it.id == settings.serverSelectionId }
+            if (candidates().none { it.supported }) {
+                throw ZarpException(if (chosen.isNotEmpty() && chosen.all { !it.hasTls }) Msg("proxy.noHandshake") else Msg("server.noStrategy"))
+            }
+            tunnels.beginOperation(settings)
+            return
+        }
+        tunnels.beginOperation(settings)
+        EndpointParser.parse(settings.customEndpoints)
         if (!account.registered) log.write(L.t("log.warpRegistering"))
         try {
             account.ensureRegistered()
@@ -228,10 +278,10 @@ class ZarpEngine(
      */
     internal suspend fun test(s: Strategy): TestResult {
         val now = clock()
-        s.plan.unsupported?.let { return TestResult.unsupported(s.id, it, now) }
-        val custom = EndpointParser.parse(settings.customEndpoints)
+        s.unsupported?.let { return TestResult.unsupported(s.id, it, now) }
+        val custom = if (s.isWarp) EndpointParser.parse(settings.customEndpoints) else emptyList()
         val endpoint = when {
-            !s.transport.isWarp -> null
+            !s.isWarp -> null
             settings.isolateTests -> endpoints.next(s.transport, custom)
             else -> custom.firstOrNull()
         }
@@ -240,21 +290,35 @@ class ZarpEngine(
         } catch (e: CancellationException) {
             throw e
         } catch (e: TunnelException) {
+            if (!s.isWarp) return TestResult.failed(s.id, ServerErrors.describe(if (e.timeout) "timeout" else "", e.message.orEmpty()), now)
             return if (e.timeout) TestResult.failed(s.id, Msg("err.timeout", settings.testTimeoutSec), now, endpoint)
             else TestResult.failedRaw(s.id, e.message.orEmpty(), now, endpoint)
         } catch (e: Exception) {
-            return TestResult.failedRaw(s.id, e.message ?: e.javaClass.simpleName, now, endpoint)
+            return if (!s.isWarp) TestResult.failed(s.id, (e as? ZarpException)?.msg ?: ServerErrors.describe("", e.message.orEmpty()), now)
+                else TestResult.failedRaw(s.id, e.message ?: e.javaClass.simpleName, now, endpoint)
         }
         try {
+            var first: Measurement.Ok? = null
+            if (!s.isWarp) {
+                val initial = probe.probeProxy(tunnel.socksPort)
+                if (initial !is Measurement.Ok) return TestResult.failed(s.id, tunnel.failure() ?: Msg("server.err.other"), now, tunnel.endpoint)
+                first = initial
+            }
             return when (val m = measure(s, tunnel.socksPort, 3)) {
-                is Measurement.Ok -> TestResult(
-                    strategyId = s.id, ok = true, connectMs = m.firstResponseMs ?: tunnel.connectMs, pingMs = m.pingMs,
-                    endpoint = tunnel.endpoint, timestamp = now,
+                is Measurement.Ok -> if (!tunnel.strategyApplied()) TestResult.failed(s.id, Msg("proxy.noHandshake"), now, tunnel.endpoint)
+                else TestResult(
+                    strategyId = s.id, ok = true, connectMs = first?.firstResponseMs ?: m.firstResponseMs ?: tunnel.connectMs,
+                    pingMs = m.pingMs, endpoint = tunnel.endpoint, timestamp = now,
                 )
                 is Measurement.NotWarp -> TestResult.failed(s.id, Msg("err.notWarp", m.warp ?: "?"), now, tunnel.endpoint)
-                is Measurement.NoTraffic -> TestResult.failed(s.id, Msg("err.noTraffic"), now, tunnel.endpoint)
-                    .copy(error = m.lastError)
+                is Measurement.NoTraffic -> if (s.isWarp) TestResult.failed(s.id, Msg("err.noTraffic"), now, tunnel.endpoint).copy(error = m.lastError)
+                    else TestResult.failed(s.id, tunnel.failure() ?: Msg("server.err.other"), now, tunnel.endpoint)
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return if (s.isWarp) TestResult.failedRaw(s.id, e.message ?: e.javaClass.simpleName, now, tunnel.endpoint)
+                else TestResult.failed(s.id, (e as? ZarpException)?.msg ?: tunnel.failure() ?: ServerErrors.describe("", e.message.orEmpty()), now)
         } finally {
             tunnel.close()
         }
@@ -262,6 +326,10 @@ class ZarpEngine(
 
     /** @param stopAfter stop phase 1 after this many working strategies; 0 = test all. */
     private suspend fun searchAndApply(list: List<Strategy>, stopAfter: Int, title: String) {
+        if (settings.useProxy) {
+            searchServerPairs(list, stopAfter, title)
+            return
+        }
         val candidates = mutableListOf<Pair<Strategy, TestResult>>()
         log.write(title)
         setProgress(0, list.size)
@@ -322,11 +390,41 @@ class ZarpEngine(
         if (!applyFirstWorking(confirmed)) set(EngineState.Error, Msg("detail.foundButFailed"))
     }
 
+    /** Server pairs are confirmed inline; Quick Scan counts confirmed pairs only. */
+    private suspend fun searchServerPairs(list: List<Strategy>, stopAfter: Int, title: String) {
+        log.write(title)
+        setProgress(0, list.size)
+        var confirmedCount = 0
+        for ((index, s) in list.withIndex()) {
+            coroutineContext.ensureActive()
+            set(EngineState.Searching, Msg("detail.testing", index + 1, list.size, s.name), strategy = s)
+            val first = test(s)
+            var result = first
+            if (first.ok) {
+                set(EngineState.Searching, Msg("detail.confirmingPair", index + 1, list.size, s.name), strategy = s)
+                val second = test(s)
+                result = if (second.ok) TestResult.confirmed(first, second) else second.copy(rechecked = true)
+            }
+            putResult(result)
+            saveResults()
+            setProgress(index + 1, list.size)
+            log.write(if (result.ok) L.t("log.recheckOk", s.logName, result.connectMs, result.pingMs)
+                else L.t("log.testFail", s.logName, result.logError))
+            if (result.ok && ++confirmedCount >= stopAfter && stopAfter > 0) break
+        }
+        val scanned = list.map { it.id }.toSet()
+        val ordered = confirmedStrategies(null).filter { it.id in scanned }
+        if (ordered.isEmpty()) {
+            stopAll()
+            set(EngineState.Error, Msg("detail.notFound"))
+        } else if (!applyFirstWorking(ordered)) set(EngineState.Error, Msg("detail.foundButFailed"))
+    }
+
     /** Confirmed strategies, best (lowest score) first. */
     fun confirmedStrategies(except: Strategy?): List<Strategy> {
         val res = _results.value
         return candidates()
-            .filter { it != except && res[it.id]?.let { r -> r.ok && r.confirmed } == true }
+            .filter { it.id != except?.id && it.supported && res[it.id]?.let { r -> r.ok && r.confirmed } == true }
             .sortedBy { res.getValue(it.id).score }
     }
 
@@ -339,37 +437,38 @@ class ZarpEngine(
                 return true
             }
             markFailed(s)
-            log.write(L.t("log.tryNext", s.name))
+            log.write(L.t("log.tryNext", s.logName))
         }
         return false
     }
 
     private suspend fun markFailed(s: Strategy) {
-        putResult(TestResult.failed(s.id, Msg("result.applyFailed"), clock()))
+        putResult(TestResult.failed(s.id, if (s.isWarp) Msg("result.applyFailed") else _status.value.detail, clock()))
         saveResults()
     }
 
     /** Connect with the given strategy: persistent tunnel, WARP check, then the VPN. */
     private suspend fun apply(s: Strategy): Boolean {
         set(EngineState.Connecting, Msg("detail.connectingTo", s.name), strategy = s)
-        log.write(L.t("log.connectingWith", s.name))
+        log.write(L.t("log.connectingWith", s.logName))
         stopAll()
-        s.plan.unsupported?.let {
-            log.write(L.t("log.unsupported", s.name, it.toString()))
-            set(EngineState.Error, Msg("detail.connectFailed"))
+        s.unsupported?.let {
+            log.write(L.t("log.unsupported", s.logName, it.toString()))
+            set(EngineState.Error, it)
             return false
         }
 
         val timeoutMs = maxOf(30, settings.testTimeoutSec * 2) * 1000
-        val custom = EndpointParser.parse(settings.customEndpoints)
-        val endpoint = if (s.transport.isWarp) _results.value[s.id]?.endpoint?.takeIf { it in custom } ?: custom.firstOrNull() else null
+        val custom = if (s.isWarp) EndpointParser.parse(settings.customEndpoints) else emptyList()
+        val endpoint = if (s.isWarp) _results.value[s.id]?.endpoint?.takeIf { it in custom } ?: custom.firstOrNull() else null
         val tunnel = try {
             tunnels.open(s, endpoint, timeoutMs, persistent = true, onStatus = ::onTunnelStatus)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            log.write(L.t("log.warpNotConnectedReason", e.message.orEmpty()))
-            set(EngineState.Error, Msg("detail.connectFailed"))
+            val msg = if (s.isWarp) Msg("detail.connectFailed") else (e as? ZarpException)?.msg ?: ServerErrors.describe("", e.message.orEmpty())
+            log.write(if (s.isWarp) L.t("log.warpNotConnectedReason", e.message.orEmpty()) else msg.toString())
+            set(EngineState.Error, msg)
             return false
         }
         val m = try {
@@ -378,7 +477,10 @@ class ZarpEngine(
             tunnel.close()
             throw e
         }
-        if (m !is Measurement.Ok) {
+        if (m !is Measurement.Ok || !tunnel.strategyApplied()) {
+            val failure = if (!s.isWarp) {
+                if (m is Measurement.Ok) Msg("proxy.noHandshake") else tunnel.failure() ?: Msg("server.err.other")
+            } else Msg("detail.connectFailed")
             tunnel.close()
             log.write(
                 when (m) {
@@ -386,19 +488,27 @@ class ZarpEngine(
                     else -> L.t("err.noTraffic")
                 }
             )
-            set(EngineState.Error, Msg("detail.connectFailed"))
+            set(EngineState.Error, failure)
             return false
         }
         try {
             vpn.start(tunnel.socksPort, s.name)
+            if (!s.isWarp && probe.probeProxy(tunnel.socksPort) !is Measurement.Ok) {
+                throw ZarpException(tunnel.failure() ?: Msg("server.err.other"))
+            }
         } catch (e: Throwable) {
             tunnel.close()
+            withContext(NonCancellable) { vpn.stop() }
             if (e is CancellationException) throw e
-            throw if (e is VpnStartException) e else VpnStartException(e.message ?: e.javaClass.simpleName, e)
+            if (e is ZarpException) throw e
+            throw if (!s.isWarp) ZarpException(ServerErrors.describe("", e.message.orEmpty()))
+                else VpnStartException(e.message ?: e.javaClass.simpleName, e)
         }
         active = tunnel
+        _activePair.value = s
         val connectMs = m.firstResponseMs ?: tunnel.connectMs
-        log.write(L.t(if (s.transport.isWarp) "log.warpConnected" else "log.proxyConnected", connectMs, m.pingMs, tunnel.endpoint))
+        log.write(L.t(if (s.isWarp) "log.warpConnected" else "log.proxyConnected", connectMs, m.pingMs,
+            if (s.isWarp) tunnel.endpoint else s.logName))
         set(
             EngineState.Connected, Msg("detail.strategy", s.name), strategy = s,
             connectMs = connectMs, pingMs = m.pingMs, endpoint = tunnel.endpoint,
@@ -407,7 +517,7 @@ class ZarpEngine(
     }
 
     private suspend fun measure(strategy: Strategy, port: Int, samples: Int): Measurement =
-        if (strategy.transport.isWarp) probe.measure(port, samples) else probe.measureProxy(port, samples)
+        if (strategy.isWarp) probe.measure(port, samples) else probe.measureProxy(port, samples)
 
     private fun onTunnelStatus(connected: Boolean, message: String) {
         if (active == null) return
@@ -420,6 +530,7 @@ class ZarpEngine(
     private suspend fun stopAll() {
         val t = active
         active = null
+        _activePair.value = null
         t?.close()
         vpn.stop()
     }

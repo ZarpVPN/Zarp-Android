@@ -218,7 +218,7 @@ func TestProxyProtocols(t *testing.T) {
 			vless.RegisterInbound(registry)
 			trojan.RegisterInbound(registry)
 			hysteria2.RegisterInbound(registry)
-			port, err := freePort()
+			port, err := freeTestServerPort()
 			if err != nil {
 				t.Fatal(err)
 			}

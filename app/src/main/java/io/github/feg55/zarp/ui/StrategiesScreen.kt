@@ -59,12 +59,15 @@ fun StrategiesScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier:
     val strategies by vm.strategies.collectAsStateWithLifecycle()
     val results by vm.results.collectAsStateWithLifecycle()
     val selectedId by vm.selectedId.collectAsStateWithLifecycle()
+    val active by vm.activePair.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
     var checked by remember { mutableStateOf(setOf<String>()) }
     var details by remember { mutableStateOf<Strategy?>(null) }
     val busy = status.state.busy
     val settings by vm.settings.collectAsStateWithLifecycle()
     var endpointsOpen by rememberSaveable { mutableStateOf(false) }
+    var query by rememberSaveable { mutableStateOf("") }
+    val visible = remember(strategies, query) { strategies.filter { query.isBlank() || it.name.contains(query, true) || it.protocolTitle.contains(query, true) } }
     BackHandler(endpointsOpen) { endpointsOpen = false }
     if (endpointsOpen) {
         EndpointsScreen(vm, { endpointsOpen = false }, modifier)
@@ -83,19 +86,21 @@ fun StrategiesScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier:
             item {
                 DarkButton(L.t("endpoint.title"), { endpointsOpen = true }, Modifier.fillMaxWidth())
             }
-            if (settings?.useProxy != true) item {
+            item {
                 CountryFilter(settings?.strategyCountry ?: "all", enabled = !busy) { country ->
                     checked = emptySet()
                     details = null
                     vm.updateSettings { it.copy(strategyCountry = StrategyFilter.toggle(it.strategyCountry, country)) }
                 }
             }
-            if (strategies.isEmpty()) item { Text(L.t("filter.empty"), color = Zc.TextDim) }
-            items(strategies, key = { it.id }) { s ->
+            item { DarkField(query, { query = it.take(128) }, L.t("server.searchPairs"), singleLine = true) }
+            if (active?.profile != null) item { SettingsHint(L.t("server.activePair", active!!.name)) }
+            if (visible.isEmpty()) item { Text(L.t("filter.empty"), color = Zc.TextDim) }
+            items(visible, key = { it.id }) { s ->
                 StrategyRow(
                     s = s,
                     r = results[s.id],
-                    current = s.id == selectedId,
+                    current = s.id == (active?.id ?: selectedId),
                     checked = s.id in checked,
                     onCheck = { on -> checked = if (on) checked + s.id else checked - s.id },
                     onClick = { details = s },
@@ -191,7 +196,7 @@ private fun StrategyRow(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     AssistChip(
                         onClick = onClick,
-                        label = { Text(s.transport.shortName.uppercase(), fontSize = 12.sp) },
+                        label = { Text(s.profile?.protocolTitle ?: s.transport.shortName.uppercase(), fontSize = 12.sp) },
                         colors = AssistChipDefaults.assistChipColors(labelColor = Zc.TextDim),
                         border = BorderStroke(1.dp, Zc.Border),
                     )
@@ -205,6 +210,7 @@ private fun StrategyRow(
 
 /** Result text and color: green for ✔✔, orange for a single check, red for a failure. */
 fun resultLabel(s: Strategy, r: TestResult?): Pair<String, Color> = when {
+    s.plain -> L.t("server.plainOnly") to Color(0xFFFFC857)
     !s.supported -> L.t("result.unsupported") to Zc.TextDisabled
     r == null -> L.t("result.notTested") to Zc.TextDim
     r.ok && r.confirmed -> (L.t("result.works2") + "  " + L.t("result.times", r.connectMs, r.pingMs)) to Zc.Ok
@@ -231,9 +237,10 @@ private fun StrategyDialog(
         title = { Text(s.name, fontSize = 19.sp) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(s.transport.title, color = Zc.TextDim, fontSize = 13.sp)
+                Text(s.protocolTitle, color = Zc.TextDim, fontSize = 13.sp)
+                if (s.plain) Text(L.t("server.plainOnly"), color = Color(0xFFFFC857), fontSize = 14.sp)
                 Text(s.args.ifBlank { "-" }, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Zc.TextDim)
-                s.plan.unsupportedReason?.let { Text(L.t("err.unsupported", it), color = Zc.Bad, fontSize = 14.sp) }
+                s.unsupported?.let { Text(L.t("err.unsupported", it.toString()), color = Zc.Bad, fontSize = 14.sp) }
                 if (r != null && s.supported) {
                     val (text, color) = resultLabel(s, r)
                     Text(text, color = color, fontSize = 14.sp)

@@ -30,15 +30,18 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
+      - name: Fetch verified Xray integration-test server
+        run: sh scripts/fetch-test-xray.sh "$RUNNER_TEMP/zarp-test-xray" linux
+
+      - name: Kotlin unit tests and outbound contracts
+        run: ./gradlew test --console=plain
+
       - name: Go core - vet and test
         working-directory: core
         run: |
           test -z "$(gofmt -l zarpcore third_party/usque/pub)"
           go vet -tags=with_quic,with_utls,http2legacy ./zarpcore
           go test -tags=with_quic,with_utls,http2legacy ./zarpcore
-
-      - name: Unit tests
-        run: ./gradlew test --console=plain
 
       - name: Lint
         run: ./gradlew lint --console=plain

@@ -16,6 +16,9 @@ class DebugCommandReceiver : BroadcastReceiver() {
         val arg = parts.getOrNull(1).orEmpty()
         fun pick() = engine.strategies.value.filter { it.id in arg.split(",") }
         val ok = when (parts[0]) {
+            "verify-start" -> DebugServerVerifier.start(app)
+            "verify-stats" -> DebugServerVerifier.snapshot(app)
+            "verify-stop" -> DebugServerVerifier.stop(app)
             "quick" -> engine.search(full = false)
             "full" -> engine.search(full = true)
             "connect" -> engine.connect()
@@ -25,6 +28,6 @@ class DebugCommandReceiver : BroadcastReceiver() {
             "use" -> pick().firstOrNull()?.let { engine.useStrategy(it) } ?: false
             else -> false
         }
-        app.log.write("debug command '${parts[0]} $arg': ${if (ok) "started" else "rejected"}")
+        app.log.write("debug command: ${if (ok) "started" else "rejected"}")
     }
 }

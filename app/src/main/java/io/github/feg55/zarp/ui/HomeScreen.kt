@@ -89,7 +89,7 @@ fun HomeScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier: Modif
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text("Zarp", color = Zc.Text, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            Text(L.t(if (settings?.useProxy == true) "proxy.subtitle" else "main.subtitle"), color = Zc.TextDim, fontSize = 14.sp, textAlign = TextAlign.Center)
+            Text(L.t(if (status.strategy?.profile != null || settings?.useProxy == true) "proxy.subtitle" else "main.subtitle"), color = Zc.TextDim, fontSize = 14.sp, textAlign = TextAlign.Center)
 
             if (short) {
                 Spacer(Modifier.height(16.dp))
@@ -132,7 +132,8 @@ fun HomeScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier: Modif
                 val saved = results[s?.id]?.takeIf { it.ok }
                 val connectMs = status.connectMs ?: saved?.connectMs
                 val pingMs = status.pingMs ?: saved?.pingMs
-                InfoRow(L.t("col.protocol"), s?.transport?.title ?: "-")
+                InfoRow(L.t("col.protocol"), s?.protocolTitle ?: "-")
+                if (s?.plain == true) Text(L.t("server.plainOnly"), color = androidx.compose.ui.graphics.Color(0xFFFFC857), fontSize = 13.sp)
                 InfoRow(L.t("info.endpoint"), status.endpoint ?: saved?.endpoint ?: "-")
                 InfoRow(L.t("info.connect"), connectMs?.let { L.t("info.ms", it) } ?: "-")
                 InfoRow(L.t("info.ping"), pingMs?.let { L.t("info.ms", it) } ?: "-")

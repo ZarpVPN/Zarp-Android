@@ -48,11 +48,18 @@ fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val status by vm.status.collectAsStateWithLifecycle()
     var pendingTos by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var otherVpn by remember { mutableStateOf(false) }
+    var pendingOtherVpn by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     // engine action -> ToS consent (registration) -> VPN permission -> action
     val guarded: (() -> Unit) -> Unit = { action ->
         val run = { withVpnPermission(action) }
-        if (settings?.useProxy == true || settings?.tosAccepted == true || vm.accountRegistered) run() else pendingTos = run
+        val consent = {
+            if (settings?.useProxy == true || settings?.tosAccepted == true || vm.accountRegistered) run() else pendingTos = run
+        }
+        if (vm.foreignVpnActive()) {
+            if (settings?.useProxy == true) otherVpn = true else pendingOtherVpn = consent
+        } else consent()
     }
 
     // auto-connect once per process start, only when nothing needs the user's answer
@@ -61,11 +68,30 @@ fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
         val s = settings ?: return@LaunchedEffect
         if (!autoTried && s.autoConnect && status.state == EngineState.Idle && (s.useProxy || s.tosAccepted || vm.accountRegistered)) {
             autoTried = true
-            withVpnPermission { vm.connect() }
+            if (!vm.foreignVpnActive()) withVpnPermission { vm.connect() }
         }
     }
 
     key(language) {
+        if (otherVpn) AlertDialog(
+            onDismissRequest = { otherVpn = false },
+            title = { Text(L.t("server.otherVpnTitle")) },
+            text = { Text(L.t("server.otherVpn")) },
+            confirmButton = { TextButton(onClick = { otherVpn = false }) { Text(L.t("btn.back")) } },
+        )
+        pendingOtherVpn?.let { next ->
+            AlertDialog(
+                onDismissRequest = { pendingOtherVpn = null },
+                title = { Text(L.t("server.otherVpnTitle")) },
+                text = { Text(L.t("warp.otherVpn")) },
+                confirmButton = {
+                    TextButton(onClick = { pendingOtherVpn = null; next() }) { Text(L.t("btn.continue")) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingOtherVpn = null }) { Text(L.t("btn.cancel")) }
+                },
+            )
+        }
         pendingTos?.let { next ->
             AlertDialog(
                 onDismissRequest = { pendingTos = null },

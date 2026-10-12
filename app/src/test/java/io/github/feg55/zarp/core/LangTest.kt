@@ -21,7 +21,8 @@ class LangTest {
                 val value = L.raw(lang, key)!!
                 assertEquals("placeholders of $lang/$key", L.placeholders(L.raw("en", key)!!), L.placeholders(value))
                 assertTrue("$lang/$key is empty", value.isNotBlank())
-                assertFalse("$lang/$key has an em dash", value.contains('—'))
+                assertFalse("$lang/$key has an em dash", value.contains('\u2014'))
+                assertFalse("$lang/$key has an en dash", value.contains('\u2013'))
             }
         }
     }

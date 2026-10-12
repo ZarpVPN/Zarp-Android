@@ -38,6 +38,9 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
+      - name: Fetch verified Xray integration-test server
+        run: sh scripts/fetch-test-xray.sh "$RUNNER_TEMP/zarp-test-xray" linux
+
       - name: Check signing secrets
         env:
           KEYSTORE: ${{ secrets.ZARP_KEYSTORE_BASE64 }}
@@ -54,6 +57,13 @@ jobs:
 
       - name: Test and lint
         run: ./gradlew test lint --console=plain
+
+      - name: Go core - vet and integration tests
+        working-directory: core
+        run: |
+          test -z "$(gofmt -l zarpcore third_party/usque/pub)"
+          go vet -tags=with_quic,with_utls,http2legacy ./zarpcore
+          go test -tags=with_quic,with_utls,http2legacy ./zarpcore
 
       - name: Build signed release APK
         env:

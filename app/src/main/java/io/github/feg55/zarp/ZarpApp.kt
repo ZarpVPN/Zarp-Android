@@ -13,6 +13,9 @@ import io.github.feg55.zarp.core.NetworkInspector
 import io.github.feg55.zarp.core.ZarpEngine
 import io.github.feg55.zarp.data.DataStoreZarpStore
 import io.github.feg55.zarp.data.GeoDataRepository
+import io.github.feg55.zarp.data.ServerRepository
+import io.github.feg55.zarp.vpn.AndroidOperationLifetime
+import kotlinx.coroutines.Job
 import io.github.feg55.zarp.masque.MasqueAccount
 import io.github.feg55.zarp.masque.MasqueTunnelFactory
 import io.github.feg55.zarp.masque.ProxyTunnelFactory
@@ -41,6 +44,10 @@ class ZarpApp : Application() {
         private set
     lateinit var geoData: GeoDataRepository
         private set
+    lateinit var servers: ServerRepository
+        private set
+    var serverImportJob: Job? = null
+    @Volatile var privateServerDiagnostics = false
 
     private val uiPrefs by lazy { getSharedPreferences("ui", MODE_PRIVATE) }
 
@@ -60,12 +67,15 @@ class ZarpApp : Application() {
         L.init(open = { assets.open(it) }, setting = uiPrefs.getString(KEY_LANGUAGE, null))
         store = DataStoreZarpStore(this)
         geoData = GeoDataRepository(this)
-        Zarpcore.setLogger { line -> log.write("core: $line") }
+        // Server engine text may contain paths or extra values. Only classified failures reach the UI/log.
+        Zarpcore.setLogger { line -> if (::engine.isInitialized && !engine.serverMode && !privateServerDiagnostics)
+            log.write("core: " + line.replace(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}(?::[0-9]+)?"), "<endpoint>")) }
 
         val settings = suspend { store.settings() }
         val warpConfig = File(filesDir, "warp-masque.json")
         account = MasqueAccount(warpConfig, settings, log)
         val vpn = VpnServiceController(this, settings)
+        servers = ServerRepository(settings, { transform -> store.updateSettings(transform) }, log = log)
         engine = ZarpEngine(
             scope = appScope,
             store = store,
@@ -73,12 +83,20 @@ class ZarpApp : Application() {
                 MasqueTunnelFactory(warpConfig.absolutePath, BlobStore { assets.open(it) }, settings, vpn, log),
                 settings,
                 routingRules = geoData::compile,
+                blobs = BlobStore { assets.open(it) },
+                protector = vpn,
             ),
             probe = TraceClient(),
             vpn = vpn,
             account = account,
             network = AndroidNetworkInspector(this),
             log = log,
+            refreshServers = servers::ensure,
+            capabilities = object : io.github.feg55.zarp.core.StrategyCapabilities {
+                override val udpTtl by lazy { Zarpcore.canSetUDPTTL() }
+                override val tcpTtl by lazy { Zarpcore.canSetTCPTTL() }
+            },
+            lifetime = AndroidOperationLifetime(this),
         )
         log.write(L.t("log.started", BuildConfig.VERSION_NAME))
         appScope.launch { engine.load() }
@@ -90,7 +108,8 @@ class AndroidNetworkInspector(context: Context) : NetworkInspector {
     private val cm = context.getSystemService(ConnectivityManager::class.java)
 
     override fun foreignVpnActive(): Boolean {
-        val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return false) ?: return false
-        return caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        if (io.github.feg55.zarp.vpn.ZarpVpnService.instance != null) return false
+        val active = cm.activeNetwork ?: return false
+        return cm.getNetworkCapabilities(active)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
     }
 }

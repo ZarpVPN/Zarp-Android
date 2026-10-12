@@ -15,7 +15,7 @@ object StrategyFilter {
 
     fun matches(strategy: Strategy, country: String): Boolean {
         val selected = selected(country)
-        return !strategy.transport.isWarp || selected.isEmpty() ||
+        return selected.isEmpty() ||
             (strategy.usesDesync && strategy.countries.any { it in selected })
     }
 
