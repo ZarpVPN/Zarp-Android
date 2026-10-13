@@ -1,10 +1,10 @@
 # Zarp for Android
 
-[![Android](https://github.com/feg55/Zarp-Android/actions/workflows/android.yml/badge.svg)](https://github.com/feg55/Zarp-Android/actions/workflows/android.yml)
-[![Release](https://img.shields.io/github/v/release/feg55/Zarp-Android)](https://github.com/feg55/Zarp-Android/releases/latest)
-[![License: GPL-3.0](https://img.shields.io/github/license/feg55/Zarp-Android)](LICENSE)
+[![Android](https://github.com/ZarpVPN/Zarp-Android/actions/workflows/android.yml/badge.svg)](https://github.com/ZarpVPN/Zarp-Android/actions/workflows/android.yml)
+[![Release](https://img.shields.io/github/v/release/ZarpVPN/Zarp-Android)](https://github.com/ZarpVPN/Zarp-Android/releases/latest)
+[![License: GPL-3.0](https://img.shields.io/github/license/ZarpVPN/Zarp-Android)](LICENSE)
 
-Cloudflare WARP or your own proxy server on networks that block them. Android version of [Zarp](https://github.com/feg55/Zarp): it finds a DPI strategy, checks it twice, remembers the exact connection and connects.
+Cloudflare WARP or your own proxy server on networks that block them. Android version of [Zarp](https://github.com/ZarpVPN/Zarp): it finds a DPI strategy, checks it twice, remembers the exact connection and connects.
 
 ![Zarp for Android: home, strategies and settings](docs/screenshots.png)
 
@@ -12,13 +12,13 @@ Cloudflare WARP or your own proxy server on networks that block them. Android ve
 
 | Platform | Download | Requirements |
 |---|---|---|
-| **Android** | [**APK**](https://github.com/feg55/Zarp-Android/releases/latest) · [all releases](https://github.com/ZarpVPN/Zarp-Android/releases) | Android 8.0+, no root, no WARP app needed |
-| **Windows** | [**Zarp.exe**](https://github.com/feg55/Zarp/releases/latest/download/Zarp.exe) · [all releases](https://github.com/feg55/Zarp/releases) · [source](https://github.com/ZarpVPN/Zarp)| Windows 10/11 x64, administrator rights. [Cloudflare WARP](https://one.one.one.one/) is installed by Zarp if it is missing |
-| **macOS** | [**DMG**](https://github.com/feg55/Zarp-MacOS/releases/latest) · [all releases](https://github.com/feg55/Zarp-MacOS/releases) · [source](https://github.com/feg55/Zarp-MacOS)| Apple Silicon (M1 or newer), macOS 14+, an administrator password once. No WARP app needed
+| **Android** | [**APK**](https://github.com/ZarpVPN/Zarp-Android/releases/latest) · [all releases](https://github.com/ZarpVPN/Zarp-Android/releases) | Android 8.0+, no root, no WARP app needed |
+| **Windows** | [**Zarp.exe**](https://github.com/ZarpVPN/Zarp/releases/latest/download/Zarp.exe) · [all releases](https://github.com/ZarpVPN/Zarp/releases) · [source](https://github.com/ZarpVPN/Zarp)| Windows 10/11 x64, administrator rights. [Cloudflare WARP](https://one.one.one.one/) is installed by Zarp if it is missing |
+| **macOS** | [**DMG**](https://github.com/ZarpVPN/Zarp-MacOS/releases/latest) · [all releases](https://github.com/ZarpVPN/Zarp-MacOS/releases) · [source](https://github.com/ZarpVPN/Zarp-MacOS)| Apple Silicon (M1 or newer), macOS 14+, an administrator password once. No WARP app needed
 
-[![Android release](https://img.shields.io/github/v/release/feg55/Zarp-Android?label=Android)](https://github.com/feg55/Zarp-Android/releases/latest)
-[![Windows release](https://img.shields.io/github/v/release/feg55/Zarp?label=Windows)](https://github.com/feg55/Zarp/releases/latest)
-[![macOS release](https://img.shields.io/github/v/release/feg55/Zarp-MacOS?label=macOS)](https://github.com/feg55/Zarp-MacOS/releases/latest)
+[![Android release](https://img.shields.io/github/v/release/ZarpVPN/Zarp-Android?label=Android)](https://github.com/ZarpVPN/Zarp-Android/releases/latest)
+[![Windows release](https://img.shields.io/github/v/release/ZarpVPN/Zarp?label=Windows)](https://github.com/ZarpVPN/Zarp/releases/latest)
+[![macOS release](https://img.shields.io/github/v/release/ZarpVPN/Zarp-MacOS?label=macOS)](https://github.com/ZarpVPN/Zarp-MacOS/releases/latest)
 
 ## 💬 Community & Support
 Have questions, ideas, or feedback?
@@ -51,7 +51,7 @@ Join our [Zarp Community](https://github.com/orgs/ZarpVPN/discussions)!
 
 ## Usage
 
-1. Download the APK from [Releases](https://github.com/feg55/Zarp-Android/releases/latest) and install it.
+1. Download the APK from [Releases](https://github.com/ZarpVPN/Zarp-Android/releases/latest) and install it.
 2. Tap the power button. Accept the WARP terms and the VPN request the first time.
 3. The first search takes about a minute. After that Zarp connects with the saved strategy.
 
@@ -121,7 +121,7 @@ WARP is covered by the [Cloudflare WARP privacy policy](https://www.cloudflare.c
 Needs JDK 17+, Go (version in `core/go.mod`) and the Android SDK with platform `android-37.0`, build-tools 36.1.0 and NDK 29.0.14206865.
 
 ```sh
-git clone --recursive https://github.com/feg55/Zarp-Android
+git clone --recursive https://github.com/ZarpVPN/Zarp-Android
 cd Zarp-Android
 ./gradlew test lint assembleDebug   # app/build/outputs/apk/debug/app-debug.apk
 ```
