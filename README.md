@@ -8,6 +8,17 @@ Cloudflare WARP or your own proxy server on networks that block them. Android ve
 
 ![Zarp for Android: home, strategies and settings](docs/screenshots.png)
 
+## Download
+
+| Platform | Download | Requirements |
+|---|---|---|
+| **Android** | [**APK**](https://github.com/feg55/Zarp-Android/releases/latest) · [all releases](https://github.com/ZarpVPN/Zarp-Android/releases) | Android 8.0+, no root, no WARP app needed |
+| **Windows** | [**Zarp.exe**](https://github.com/feg55/Zarp/releases/latest/download/Zarp.exe) · [all releases](https://github.com/feg55/Zarp/releases) · [source](https://github.com/ZarpVPN/Zarp)| Windows 10/11 x64, administrator rights. [Cloudflare WARP](https://one.one.one.one/) is installed by Zarp if it is missing |
+| **macOS** | [**DMG**](https://github.com/feg55/Zarp-MacOS/releases/latest) · [all releases](https://github.com/feg55/Zarp-MacOS/releases) · [source](https://github.com/feg55/Zarp-MacOS)| Apple Silicon (M1 or newer), macOS 14+, an administrator password once. No WARP app needed
+
+[![Android release](https://img.shields.io/github/v/release/feg55/Zarp-Android?label=Android)](https://github.com/feg55/Zarp-Android/releases/latest)
+[![Windows release](https://img.shields.io/github/v/release/feg55/Zarp?label=Windows)](https://github.com/feg55/Zarp/releases/latest)
+[![macOS release](https://img.shields.io/github/v/release/feg55/Zarp-MacOS?label=macOS)](https://github.com/feg55/Zarp-MacOS/releases/latest)
 
 ## 💬 Community & Support
 Have questions, ideas, or feedback?
