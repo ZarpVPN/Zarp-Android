@@ -8,6 +8,17 @@ Cloudflare WARP or your own proxy server on networks that block them. Android ve
 
 ![Zarp for Android: home, strategies and settings](docs/screenshots.png)
 
+
+## 💬 Community & Support
+Have questions, ideas, or feedback?
+Join our [Zarp Community](https://github.com/orgs/ZarpVPN/discussions)!
+
+- ❓ Ask questions and get help
+- 💡 Suggest new features
+- 📢 Follow announcements
+- 🗳️ Vote on upcoming improvements
+
+
 ## Features
 
 - **One button.** The first tap searches for the fastest working strategy, later taps connect right away.
