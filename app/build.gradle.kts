@@ -6,6 +6,22 @@ plugins {
 
 val abis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
 
+abstract class LicenseAssetsTask : Sync() {
+    @get:OutputDirectory
+    abstract val assetsDirectory: DirectoryProperty
+}
+
+val licenseAssets = layout.buildDirectory.dir("generated/licenseAssets")
+val prepareLicenses = tasks.register<LicenseAssetsTask>("prepareLicenses") {
+    from(rootProject.layout.projectDirectory.dir("licenses")) { into("licenses") }
+    from(rootProject.layout.projectDirectory.file("LICENSE")) {
+        into("licenses")
+        rename { "Zarp-GPL-3.0.txt" }
+    }
+    assetsDirectory.set(licenseAssets)
+    into(assetsDirectory)
+}
+
 // Release signing comes from the environment (GitHub Actions secrets), never from the repo.
 val keystoreFile = providers.environmentVariable("ZARP_KEYSTORE_FILE").orNull
 
@@ -93,6 +109,10 @@ android {
     packaging { jniLibs { useLegacyPackaging = true } }
 }
 
+androidComponents.onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(prepareLicenses, LicenseAssetsTask::assetsDirectory)
+}
+
 // ---------------------------------------------------------------- Go core (MASQUE)
 
 val goCoreDir = rootProject.layout.projectDirectory.dir("core")
@@ -139,7 +159,7 @@ val buildGoCore = tasks.register<Exec>("buildGoCore") {
     if (isWindows) commandLine("cmd", "/c", script.absolutePath) else commandLine("sh", script.absolutePath)
 }
 
-tasks.named("preBuild") { dependsOn(buildGoCore) }
+tasks.named("preBuild") { dependsOn(buildGoCore, prepareLicenses) }
 
 dependencies {
     implementation(files(goCoreAar))

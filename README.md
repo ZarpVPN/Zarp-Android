@@ -12,6 +12,8 @@ Cloudflare WARP or your own proxy server on networks that block them. Android ve
 
 - **One button.** The first tap searches for the fastest working strategy, later taps connect right away.
 - **No WARP app needed.** Zarp talks to WARP itself over MASQUE (HTTP/3, with HTTP/2 as a fallback) and registers a free WARP device on first use.
+- **WARP+.** Link an existing subscription in Settings → WARP+ or Server and endpoints → WARP+. Check the account type, apply a masked license key and reconnect. Keys are never stored in settings or logs.
+- **Registration on restricted networks.** If direct registration fails with a network error, eligible TLS strategies are tried against the Cloudflare API. Country filters, the selected strategy and confirmed results determine priority. Registration and tunnel verification remain independent; an interrupted enrollment resumes the same device.
 - **Socket-compatible DPI strategies.** QUIC fakes use the real connection's UDP socket. TLS split/disorder applies to every server dial; QUIC fakes precede the first datagram of every flow.
 - **Honest testing.** Every candidate is checked twice. WARP tests rotate endpoints and require `warp=on` or `warp=plus`; imported servers require a valid HTTPS response through that server.
 - **Self-healing.** If the saved strategy stops working, Zarp tries the other verified ones before searching again. After a network change it reconnects and applies the strategy again.
@@ -21,7 +23,8 @@ Cloudflare WARP or your own proxy server on networks that block them. Android ve
 - **Strategy/server pairs.** Scans test each strategy against every compatible server, confirm pairs inline, and remember the exact pair. Plain connections require an explicit option and show a yellow "Connection without a strategy" label.
 - **Editable routing.** Settings → Routing settings provides LAN/country presets with Direct, Proxy and Block rules. Download GeoIP/GeoSite `.dat` databases from editable HTTPS sources, or use the bundled country IP ranges.
 - **Country filters.** A compact filter button selects All or multiple countries (Russia, Iran, China). Filters apply to the list, quick/full scans and automatic fallback. Direct strategies are hidden and excluded when countries are selected.
-- **Your language.** English, Русский, Español, Português, 中文, हिन्दी, Français and Deutsch. Zarp follows the system language (English if it is not on the list), and the globe button switches it on the fly.
+- **Your language.** English, Русский, Español, Português, 中文, हिन्दी, Français, Deutsch and فارسی. Persian uses right-to-left layouts; connection links, addresses, license input and technical logs retain their direction. Zarp follows the system language, and the globe button switches it on the fly.
+- **Licenses.** Settings → Licenses shows the bundled component notices and Zarp license offline.
 
 ## Requirements
 
@@ -33,7 +36,9 @@ Cloudflare WARP or your own proxy server on networks that block them. Android ve
 2. Tap the power button. Accept the WARP terms and the VPN request the first time.
 3. The first search takes about a minute. After that Zarp connects with the saved strategy.
 
-The Strategies tab shows strategies or strategy/server pairs with search, country filters and their results. Tap one to connect with it or test it again, or tick several and test them together. Server **Quick scan** stops after 3 confirmed pairs (adjustable in Settings); **Full scan** tests every pair. WARP keeps its two-phase scan and recheck flow.
+The Strategies tab shows strategies or strategy/server pairs with search, country filters and their results. Tap one to connect with it or test it again, or tick several and test them together. **Quick scan** stops after 3 independently confirmed strategies/pairs (adjustable in Settings); a failed confirmation continues the search. **Full scan** tests every candidate. WARP retains separate scan and recheck phases. Failures measured through a foreign VPN never overwrite saved WARP results.
+
+A bounded traffic check runs every seven seconds while connected. A failed check starts the normal recovery flow: retry the selected connection, try verified alternatives, then scan again.
 
 Connection and routing settings take effect on the next connection. A changed server clears saved test results. Country tags identify candidates to test, not verified country-wide bypasses; providers and DPI deployments differ. See [connection settings](docs/connection-settings.md) for supported links, routing data and limitations.
 
@@ -85,7 +90,7 @@ A search runs each strategy on its own tunnel and endpoint and fetches `cdn-cgi/
 
 Zarp has no telemetry and does not collect personal data. Its connection checks and tunnel setup use:
 
-- `api.cloudflareclient.com`, once, to register a WARP device;
+- `api.cloudflareclient.com`, to register/enroll a WARP device and, on request, read the account or link a WARP+ subscription; protected registration can use Cloudflare's published orchestration IPs with the same verified TLS hostname;
 - WARP MASQUE endpoints (`162.159.198.1`, `162.159.198.2`, or your custom endpoints), which carry the WARP tunnel;
 - your imported server instead of WARP when that mode is enabled;
 - `https://www.cloudflare.com/cdn-cgi/trace`, through the selected tunnel, to check connectivity and measure latency.
@@ -93,6 +98,8 @@ Zarp has no telemetry and does not collect personal data. Its connection checks 
 Apps use the configured VPN DNS servers. The optional proxy/routing engine uses the system resolver to find the server and the first configured VPN DNS server through the proxy to resolve destinations. Traffic excluded by app selection or a Direct rule goes directly over the underlying network. With routing rules enabled, ordinary app DNS is also handled by that engine. Explicit GeoIP/GeoSite downloads connect to the URLs selected in routing settings (by default, GitHub release downloads).
 
 WARP is covered by the [Cloudflare WARP privacy policy](https://www.cloudflare.com/application/privacypolicy/).
+
+See the [Windows release parity audit](docs/windows-release-parity.md) for the release inventory, platform differences and current verification.
 
 ## Building
 

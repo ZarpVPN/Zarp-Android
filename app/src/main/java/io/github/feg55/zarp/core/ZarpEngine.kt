@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 
 /** An error with a message in the current language. */
@@ -63,9 +64,14 @@ class ZarpEngine(
     private val _activePair = MutableStateFlow<Strategy?>(null)
     val activePair: StateFlow<Strategy?> = _activePair.asStateFlow()
 
+    private val _accountBusy = MutableStateFlow(false)
+    val accountBusy: StateFlow<Boolean> = _accountBusy.asStateFlow()
+
     private val busy = Mutex()
     private val loaded = CompletableDeferred<Unit>()
     private var job: Job? = null
+    private var accountJob: Job? = null
+    private var preserveWarpFailures = false
     @Volatile private var settings = AppSettings()
     val serverMode: Boolean get() = settings.useProxy || _activePair.value?.profile != null
 
@@ -183,7 +189,65 @@ class ZarpEngine(
 
     fun cancel() {
         job?.cancel()
+        accountJob?.cancel()
     }
+
+    /** One bounded traffic check; the application schedules it every seven seconds. */
+    suspend fun observeConnection() {
+        if (busy.isLocked) return
+        val tunnel = active ?: return
+        val strategy = _activePair.value ?: return
+        // A slow network must not block the user's Disconnect or account commands.
+        val observation = withTimeoutOrNull(8_000) {
+            try { measure(strategy, tunnel.socksPort, 0) }
+            catch (e: CancellationException) { throw e }
+            catch (_: Exception) { Measurement.NoTraffic(null) }
+        }
+        if (!busy.tryLock()) return
+        var reconnect = false
+        try {
+            if (active !== tunnel || _activePair.value != strategy) return
+            if (observation is Measurement.Ok && tunnel.strategyApplied()) {
+                _status.update { it.copy(state = EngineState.Connected, detail = Msg("detail.strategy", strategy.name), pingMs = observation.pingMs) }
+            } else {
+                set(EngineState.Connecting, Msg("detail.reconnecting"), strategy)
+                // Keep the native reconnect loop alive while the underlying link
+                // is offline; a scan at that point would only discard good results.
+                reconnect = network.internetAvailable()
+            }
+        } finally { busy.unlock() }
+        // The regular flow retries the selected strategy, verified alternatives,
+        // then a fresh scan. Cancellation/disconnection still use the same lock.
+        if (reconnect) connect()
+    }
+
+    /** Account commands share the operation lock and keep an active tunnel intact. */
+    suspend fun warpAccount(license: String? = null): WarpAccountType {
+        if (license != null && !WarpAccountType.validLicense(license)) throw WarpAccountException("invalid")
+        if (!busy.tryLock()) throw ZarpException(Msg("warpPlus.busy"))
+        _accountBusy.value = true
+        accountJob = coroutineContext[Job]
+        try {
+            loaded.await()
+            settings = store.settings()
+            lifetime?.start()
+            return if (license == null) account.readAccount() else account.applyLicense(
+                license, registrationStrategies(), active == null && !network.foreignVpnActive(),
+            ) { _, _, _ -> }
+        } finally {
+            withContext(NonCancellable) { runCatching { lifetime?.stop() } }
+            _accountBusy.value = false
+            accountJob = null
+            busy.unlock()
+        }
+    }
+
+    /** API candidates are never server pairs and never become verified tunnel results. */
+    private fun registrationStrategies(): List<Strategy> =
+        StrategyFilter.apply(StrategyCatalog.load(settings.customStrategies).map(::withCapabilities), settings.strategyCountry)
+            .filter { it.isWarp && it.supported && it.transport == Transport.MasqueH2 && !it.plan.tcpDesync.isNullOrEmpty() }
+            .sortedWith(compareByDescending<Strategy> { it.id == _selectedId.value }
+                .thenByDescending { _results.value[it.id]?.let { r -> r.ok && r.confirmed } == true })
 
     /** The VPN went away (revoked by the system or another VPN app, or stopped from the notification). */
     fun onVpnStopped(reason: Msg) {
@@ -242,6 +306,7 @@ class ZarpEngine(
             if (settings.useProxy) throw ZarpException(Msg("server.otherVpn"))
             log.write(L.t("log.otherVpnActive"))
         }
+        preserveWarpFailures = !settings.useProxy && network.foreignVpnActive()
         if (settings.useProxy) {
             Subscription.explainSource(settings.proxyUri)?.let { throw ZarpException(it) }
             settings = refreshServers(settings)
@@ -262,7 +327,9 @@ class ZarpEngine(
         EndpointParser.parse(settings.customEndpoints)
         if (!account.registered) log.write(L.t("log.warpRegistering"))
         try {
-            account.ensureRegistered()
+            account.ensureRegistered(registrationStrategies(), !network.foreignVpnActive()) { done, total, strategy ->
+                set(EngineState.Preparing, Msg("detail.warpRegistrationStrategy", done, total, strategy.name))
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -330,54 +397,66 @@ class ZarpEngine(
             searchServerPairs(list, stopAfter, title)
             return
         }
-        val candidates = mutableListOf<Pair<Strategy, TestResult>>()
         log.write(title)
-        setProgress(0, list.size)
-
-        // ---- phase 1: go through the list
-        for (s in list) {
-            coroutineContext.ensureActive()
-            set(EngineState.Searching, Msg("detail.testing", progressDone() + 1, list.size, s.name), strategy = s)
-            val r = test(s)
-            putResult(r)
-            setProgress(progressDone() + 1, list.size)
-            log.write("  " + if (r.ok) L.t("log.testOk", s.name, r.connectMs, r.pingMs) else L.t("log.testFail", s.name, r.logError))
-            if (r.ok) {
-                candidates += s to r
-                if (stopAfter > 0 && candidates.size >= stopAfter) break
-            }
-        }
-        saveResults()
-
-        // ---- phase 2: independent re-check of every candidate (another endpoint, fresh tunnel).
-        // Weeds out strategies that "passed" only thanks to the previous successful connection.
-        if (candidates.isNotEmpty()) {
-            log.write(L.t("log.recheck", candidates.size))
-            setProgress(0, candidates.size)
-            for ((k, pair) in candidates.sortedBy { it.second.score }.withIndex()) {
-                val (s, r1) = pair
-                coroutineContext.ensureActive()
-                set(EngineState.Searching, Msg("detail.rechecking", k + 1, candidates.size, s.name), strategy = s)
-                val r2 = test(s)
-                setProgress(k + 1, candidates.size)
-                if (r2.ok) {
-                    val merged = TestResult.confirmed(r1, r2)
-                    putResult(merged)
-                    log.write("  " + L.t("log.recheckOk", s.name, r2.connectMs, r2.pingMs))
-                } else {
-                    putResult(r2.copy(rechecked = true))
-                    log.write("  " + L.t("log.testFail", s.name, r2.copy(rechecked = true).logError))
-                }
-                saveResults()
-            }
-        }
-
+        var scanned = 0
+        var confirmedCount = 0
+        var hadCandidates = false
         val scannedIds = list.map { it.id }.toSet()
+
+        do {
+            val candidates = mutableListOf<Pair<Strategy, TestResult>>()
+            val needed = stopAfter - confirmedCount
+            setProgress(scanned, list.size)
+
+            // ---- phase 1: go through the list
+            for (s in list.drop(scanned)) {
+                coroutineContext.ensureActive()
+                set(EngineState.Searching, Msg("detail.testing", progressDone() + 1, list.size, s.name), strategy = s)
+                val r = test(s)
+                putResult(r)
+                scanned++
+                setProgress(progressDone() + 1, list.size)
+                log.write("  " + if (r.ok) L.t("log.testOk", s.name, r.connectMs, r.pingMs) else L.t("log.testFail", s.name, r.logError))
+                if (r.ok) {
+                    candidates += s to r
+                    hadCandidates = true
+                    if (stopAfter > 0 && candidates.size >= needed) break
+                }
+            }
+            saveResults()
+
+            // ---- phase 2: independent re-check of every candidate (another endpoint, fresh tunnel).
+            // Weeds out strategies that "passed" only thanks to the previous successful connection.
+            if (candidates.isNotEmpty()) {
+                log.write(L.t("log.recheck", candidates.size))
+                setProgress(0, candidates.size)
+                for ((k, pair) in candidates.sortedBy { it.second.score }.withIndex()) {
+                    val (s, r1) = pair
+                    coroutineContext.ensureActive()
+                    set(EngineState.Searching, Msg("detail.rechecking", k + 1, candidates.size, s.name), strategy = s)
+                    val r2 = test(s)
+                    setProgress(k + 1, candidates.size)
+                    if (r2.ok) {
+                        val merged = TestResult.confirmed(r1, r2)
+                        putResult(merged)
+                        confirmedCount++
+                        log.write("  " + L.t("log.recheckOk", s.name, r2.connectMs, r2.pingMs))
+                    } else {
+                        putResult(r2.copy(rechecked = true))
+                        log.write("  " + L.t("log.testFail", s.name, r2.copy(rechecked = true).logError))
+                    }
+                    saveResults()
+                }
+            }
+
+        // A failed confirmation does not consume Quick Scan's working quota.
+        } while (stopAfter > 0 && scanned < list.size && confirmedCount < stopAfter)
+
         val confirmed = confirmedStrategies(except = null).filter { it.id in scannedIds }
         if (confirmed.isEmpty()) {
             stopAll()
             log.write(
-                if (candidates.isNotEmpty()) L.t("log.candidatesFailed") else L.t("log.noneWorked")
+                if (hadCandidates) L.t("log.candidatesFailed") else L.t("log.noneWorked")
             )
             set(EngineState.Error, Msg("detail.notFound"))
             return
@@ -488,6 +567,9 @@ class ZarpEngine(
                     else -> L.t("err.noTraffic")
                 }
             )
+            if (s.isWarp && m is Measurement.NoTraffic && !m.lastError.isNullOrBlank()) {
+                log.write(L.t("log.warpNotConnectedReason", m.lastError))
+            }
             set(EngineState.Error, failure)
             return false
         }
@@ -543,6 +625,7 @@ class ZarpEngine(
     }
 
     private fun putResult(r: TestResult) {
+        if (preserveWarpFailures && (!r.ok || !r.confirmed)) return
         _results.update { it + (r.strategyId to r) }
     }
 

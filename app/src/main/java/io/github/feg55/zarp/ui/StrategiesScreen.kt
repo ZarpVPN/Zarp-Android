@@ -63,7 +63,8 @@ fun StrategiesScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier:
     val status by vm.status.collectAsStateWithLifecycle()
     var checked by remember { mutableStateOf(setOf<String>()) }
     var details by remember { mutableStateOf<Strategy?>(null) }
-    val busy = status.state.busy
+    val accountBusy by vm.accountBusy.collectAsStateWithLifecycle()
+    val busy = status.state.busy || accountBusy
     val settings by vm.settings.collectAsStateWithLifecycle()
     var endpointsOpen by rememberSaveable { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }

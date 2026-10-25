@@ -21,6 +21,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -48,7 +50,8 @@ fun LogsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
                 .padding(horizontal = 10.dp, vertical = 8.dp),
         ) {
             items(lines) { line ->
-                Text(line, color = Zc.TextDim, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp)
+                Text(line, color = Zc.TextDim, fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 15.sp,
+                    style = TextStyle(textDirection = TextDirection.Ltr))
             }
         }
     }

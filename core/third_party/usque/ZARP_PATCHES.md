@@ -12,3 +12,6 @@ Additions (upstream files are unchanged):
   QUIC defaults, SOCKS5 server, DNS resolver, SNI/URI constants).
 - `internal/socks5_zarp.go` adds `SOCKS5Server.Shutdown` and
   `SOCKS5Server.AllowUnassociatedUDP` (for hev-socks5-tunnel UDP relay).
+- `api/client_zarp.go` adds an independent, context-bound registration/account
+  client with bounded responses, safe HTTP errors and WARP+ license updates.
+  It never changes the process-global default HTTP client.

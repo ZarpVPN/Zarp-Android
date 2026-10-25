@@ -23,6 +23,7 @@ object L {
         Language("hi", "हिन्दी"),
         Language("fr", "Français"),
         Language("de", "Deutsch"),
+        Language("fa", "فارسی"),
     )
 
     private var open: ((String) -> InputStream)? = null
@@ -51,6 +52,7 @@ object L {
     }
 
     fun isSupported(code: String?): Boolean = code != null && languages.any { it.code == code }
+    fun isRtl(code: String): Boolean = code == "fa"
 
     fun supportedOrEnglish(code: String?): String = if (isSupported(code)) code!! else "en"
 

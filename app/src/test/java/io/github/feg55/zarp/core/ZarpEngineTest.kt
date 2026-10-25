@@ -2,9 +2,12 @@ package io.github.feg55.zarp.core
 
 import io.github.feg55.zarp.net.Measurement
 import io.github.feg55.zarp.net.WarpProbe
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -44,6 +47,13 @@ class ZarpEngineTest {
         private val portOutcome = mutableMapOf<Int, Outcome.Works>()
         private var nextPort = 20000
         var closed = 0
+        var accountStrategies = emptyList<Strategy>()
+        var protectedRegistration = false
+        var accountFailure = false
+        var accountType = WarpAccountType.Free
+        var trafficHealthy = true
+        var online = true
+        var pendingProbe: CompletableDeferred<Unit>? = null
 
         val store = InMemoryStore(settings)
 
@@ -78,6 +88,8 @@ class ZarpEngineTest {
 
         val probe = object : WarpProbe {
             override suspend fun measure(socksPort: Int, samples: Int): Measurement {
+                pendingProbe?.await()
+                if (!trafficHealthy) return Measurement.NoTraffic(null)
                 val o = portOutcome.getValue(socksPort)
                 return if (o.warp == "on" || o.warp == "plus") Measurement.Ok(o.pingMs, o.warp) else Measurement.NotWarp(o.warp)
             }
@@ -91,10 +103,25 @@ class ZarpEngineTest {
         val account = object : WarpAccount {
             override var registered = true
             override suspend fun ensureRegistered() = Unit
+            override suspend fun ensureRegistered(strategies: List<Strategy>, allowProtected: Boolean, progress: (Int, Int, Strategy) -> Unit) {
+                accountStrategies = strategies
+                protectedRegistration = allowProtected
+                if (accountFailure) throw WarpAccountException("network")
+            }
+            override suspend fun readAccount() = accountType
+            override suspend fun applyLicense(license: String, strategies: List<Strategy>, allowProtected: Boolean,
+                progress: (Int, Int, Strategy) -> Unit): WarpAccountType {
+                accountStrategies = strategies
+                protectedRegistration = allowProtected
+                return accountType
+            }
         }
 
         val logs = LogBus()
-        val engine = ZarpEngine(scope, store, tunnels, probe, vpn, account, { foreignVpn }, logs, clock = { 1000L })
+        val engine = ZarpEngine(scope, store, tunnels, probe, vpn, account, object : NetworkInspector {
+            override fun foreignVpnActive() = foreignVpn
+            override fun internetAvailable() = online
+        }, logs, clock = { 1000L })
     }
 
     private val ids = StrategyCatalog.builtIn.map { it.id }
@@ -248,6 +275,46 @@ class ZarpEngineTest {
         assertNull(env.engine.selectedId.value)
     }
 
+    @Test fun `quick scan continues until N candidates pass independent confirmation`() = runTest {
+        val env = Env(this, mapOf(
+            "warp-q-google6" to listOf(Outcome.Works(100, 10), Outcome.Timeout),
+            "warp-q-google3" to listOf(Outcome.Works(200, 20)),
+        ), AppSettings(stopAfterWorking = 1, tosAccepted = true))
+        env.engine.load()
+        env.engine.search(full = false)
+        advanceUntilIdle()
+        assertFalse(env.engine.results.value.getValue("warp-q-google6").confirmed)
+        assertTrue(env.engine.results.value.getValue("warp-q-google3").confirmed)
+        assertEquals("warp-q-google3", env.store.selected)
+        assertEquals(listOf("warp-q-google6", "warp-q-google6", "warp-q-google3", "warp-q-google3"),
+            env.opened.filter { !it.persistent }.map { it.strategyId })
+    }
+
+    @Test fun `failures through a foreign VPN never overwrite verified WARP results`() = runTest {
+        val env = Env(this, emptyMap(), foreignVpn = true)
+        val good = TestResult("warp-q-google6", ok = true, confirmed = true, connectMs = 100, pingMs = 10)
+        env.store.saved = mapOf(good.strategyId to good)
+        env.store.selected = good.strategyId
+        env.engine.load()
+        env.engine.search(full = true)
+        advanceUntilIdle()
+        assertEquals(good, env.store.saved[good.strategyId])
+        assertEquals(mapOf(good.strategyId to good), env.engine.results.value)
+        assertEquals(good.strategyId, env.store.selected)
+    }
+
+    @Test fun `an unconfirmed pass through a foreign VPN cannot replace a verified result`() = runTest {
+        val env = Env(this, mapOf("warp-q-google6" to listOf(Outcome.Works(100, 10), Outcome.Timeout)), foreignVpn = true)
+        val good = TestResult("warp-q-google6", ok = true, confirmed = true, connectMs = 200, pingMs = 20)
+        env.store.saved = mapOf(good.strategyId to good)
+        env.store.selected = good.strategyId
+        env.engine.load()
+        env.engine.search(full = true)
+        advanceUntilIdle()
+        assertEquals(mapOf(good.strategyId to good), env.store.saved)
+        assertEquals(env.store.saved, env.engine.results.value)
+    }
+
     @Test
     fun `warp off through the tunnel is a failure`() = runTest {
         val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10, warp = "off"))))
@@ -338,5 +405,96 @@ class ZarpEngineTest {
         advanceUntilIdle()
         assertEquals(EngineState.Idle, env.engine.status.value.state)
         assertEquals(closedBefore + 1, env.closed)
+    }
+
+    @Test fun `registration candidates honor country selected confirmed custom and capability filters`() = runTest {
+        val env = Env(this, emptyMap(), AppSettings(strategyCountry = "cn", customStrategies =
+            "China | h2 | --payload=tls_client_hello --lua-desync=multisplit:pos=1,host | cn\nRussia | h2 | --payload=tls_client_hello --lua-desync=multisplit:pos=1,host | ru"))
+        env.store.selected = "warp-t-split-host"
+        env.store.saved = mapOf("warp-t-split-endhost" to TestResult("warp-t-split-endhost", ok = true, confirmed = true))
+        env.accountFailure = true
+        env.engine.load()
+        val before = env.store.saved
+        env.engine.connect()
+        advanceUntilIdle()
+        val ids = env.accountStrategies.map { it.id }
+        assertEquals(listOf("warp-t-split-host", "warp-t-split-endhost"), ids.take(2))
+        assertTrue("custom-china" in ids)
+        assertFalse("custom-russia" in ids)
+        assertTrue(env.accountStrategies.all { it.transport == Transport.MasqueH2 && it.supported && it.usesDesync })
+        assertEquals(before, env.store.saved)
+        assertTrue(env.protectedRegistration)
+    }
+
+    @Test fun `account commands preserve an active connection selection and results`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        env.engine.load()
+        env.engine.connect()
+        advanceUntilIdle()
+        val before = env.engine.status.value
+        val closed = env.closed
+        val results = env.store.saved
+        assertEquals(WarpAccountType.Free, env.engine.warpAccount())
+        env.accountType = WarpAccountType.Unlimited
+        assertEquals(WarpAccountType.Unlimited, env.engine.warpAccount("12345678-abcdefgh-ABCD1234"))
+        assertFalse(env.protectedRegistration)
+        assertEquals(before, env.engine.status.value)
+        assertEquals(closed, env.closed)
+        assertEquals(results, env.store.saved)
+        assertEquals("direct", env.store.selected)
+        assertFalse(env.engine.accountBusy.value)
+    }
+
+    @Test fun `traffic loss triggers regular reconnect without abandoning the saved strategy`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        env.engine.load()
+        env.engine.connect()
+        advanceUntilIdle()
+        env.trafficHealthy = false
+        env.engine.observeConnection()
+        assertEquals(EngineState.Connecting, env.engine.status.value.state)
+        env.trafficHealthy = true
+        advanceUntilIdle()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertEquals("direct", env.store.selected)
+        assertEquals(2, env.vpnStarts.size)
+        assertEquals(1, env.closed)
+    }
+
+    @Test fun `an offline link keeps native recovery and verified results intact`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        val good = TestResult("direct", ok = true, confirmed = true)
+        env.store.saved = mapOf("direct" to good)
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        env.trafficHealthy = false
+        env.online = false
+        env.engine.observeConnection()
+        advanceUntilIdle()
+        assertEquals(EngineState.Connecting, env.engine.status.value.state)
+        assertEquals(0, env.closed)
+        assertEquals(mapOf("direct" to good), env.store.saved)
+        env.trafficHealthy = true
+        env.online = true
+        env.engine.observeConnection()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertEquals(1, env.vpnStarts.size)
+    }
+
+    @Test fun `a slow monitor cannot block disconnect or restart a disconnected VPN`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        env.pendingProbe = CompletableDeferred()
+        val observation = async { env.engine.observeConnection() }
+        runCurrent()
+        assertTrue(env.engine.disconnect())
+        advanceUntilIdle()
+        observation.await()
+        assertEquals(EngineState.Idle, env.engine.status.value.state)
+        assertEquals(1, env.closed)
+        assertEquals(1, env.vpnStarts.size)
     }
 }

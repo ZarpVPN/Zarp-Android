@@ -29,6 +29,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val results = engine.results
     val selectedId = engine.selectedId
     val activePair = engine.activePair
+    val accountBusy = engine.accountBusy
     val importState = zarp.servers.importState
     val lines = log.lines
     val settings: StateFlow<AppSettings?> =
@@ -98,7 +99,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** null follows the system language. */
     fun setLanguage(code: String?) = zarp.setLanguage(code)
 
+    suspend fun acceptWarpTos() { zarp.store.updateSettings { it.copy(tosAccepted = true) } }
+
     fun resetAccount() {
+        if (engine.accountBusy.value || status.value.state.busy || status.value.state == io.github.feg55.zarp.core.EngineState.Connected) return
         zarp.account.reset()
         log.write(L.t("log.accountReset"))
     }

@@ -119,7 +119,8 @@ fun EndpointsScreen(vm: MainViewModel, back: () -> Unit, modifier: Modifier = Mo
     val settings by vm.settings.collectAsStateWithLifecycle()
     val s = settings ?: return
     val importing by vm.importState.collectAsStateWithLifecycle()
-    val busy = vm.status.collectAsStateWithLifecycle().value.state.busy || importing.loading
+    val accountBusy by vm.accountBusy.collectAsStateWithLifecycle()
+    val busy = vm.status.collectAsStateWithLifecycle().value.state.busy || importing.loading || accountBusy
     var custom by rememberSaveable(s.customEndpoints) { mutableStateOf(s.customEndpoints) }
     var useProxy by rememberSaveable(s.useProxy) { mutableStateOf(s.useProxy) }
     var uri by rememberSaveable(s.proxyUri) { mutableStateOf(s.proxyUri) }
@@ -143,6 +144,13 @@ fun EndpointsScreen(vm: MainViewModel, back: () -> Unit, modifier: Modifier = Mo
                 importing.error?.let { SettingsHint(it.toString(), error = true) }
             } else {
                 SectionTitle(L.t("endpoint.warp"))
+                var warpPlus by remember { mutableStateOf(false) }
+                if (warpPlus) androidx.compose.material3.AlertDialog(
+                    onDismissRequest = { warpPlus = false },
+                    text = { WarpPlusScreen(vm, { warpPlus = false }, Modifier.heightIn(max = 580.dp)) },
+                    confirmButton = {},
+                )
+                DarkButton(L.t("warpPlus.title"), { warpPlus = true }, Modifier.fillMaxWidth())
                 SettingsHint(L.t("endpoint.hint"))
                 DarkField(custom, { custom = it }, "IP:port / [IPv6]:port", monospace = true, modifier = Modifier.heightIn(min = 130.dp))
                 if (!endpointValid) SettingsHint(L.t("endpoint.invalid"), error = true)

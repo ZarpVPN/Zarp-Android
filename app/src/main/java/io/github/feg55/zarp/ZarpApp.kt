@@ -27,6 +27,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.io.File
 
 class ZarpApp : Application() {
@@ -73,8 +75,8 @@ class ZarpApp : Application() {
 
         val settings = suspend { store.settings() }
         val warpConfig = File(filesDir, "warp-masque.json")
-        account = MasqueAccount(warpConfig, settings, log)
         val vpn = VpnServiceController(this, settings)
+        account = MasqueAccount(warpConfig, settings, log, vpn)
         servers = ServerRepository(settings, { transform -> store.updateSettings(transform) }, log = log)
         engine = ZarpEngine(
             scope = appScope,
@@ -100,6 +102,12 @@ class ZarpApp : Application() {
         )
         log.write(L.t("log.started", BuildConfig.VERSION_NAME))
         appScope.launch { engine.load() }
+        appScope.launch {
+            while (isActive) {
+                delay(7_000)
+                engine.observeConnection()
+            }
+        }
     }
 }
 
@@ -111,5 +119,16 @@ class AndroidNetworkInspector(context: Context) : NetworkInspector {
         if (io.github.feg55.zarp.vpn.ZarpVpnService.instance != null) return false
         val active = cm.activeNetwork ?: return false
         return cm.getNetworkCapabilities(active)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+    }
+
+    override fun internetAvailable(): Boolean {
+        @Suppress("DEPRECATION")
+        return cm.allNetworks.any { network ->
+            cm.getNetworkCapabilities(network)?.let { caps ->
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+            } == true
+        }
     }
 }

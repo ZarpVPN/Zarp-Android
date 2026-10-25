@@ -9,10 +9,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Diniboy1123/usque/api"
 	"github.com/Diniboy1123/usque/config"
 	"github.com/Diniboy1123/usque/models"
-	"github.com/Diniboy1123/usque/pub"
 )
 
 const (
@@ -26,23 +24,12 @@ const (
 // The caller must have obtained the user's consent to the Cloudflare WARP
 // Terms of Service before calling it.
 func Register(configPath string, deviceName string) error {
-	acc, err := api.Register(registerModel, registerLocale, "", true)
-	if err != nil {
-		return fmt.Errorf("register: %w", err)
-	}
-	privKey, pubKey, err := pub.GenerateEcKeyPair()
-	if err != nil {
-		return fmt.Errorf("key pair: %w", err)
-	}
-	upd, err := api.EnrollKey(acc.ID, acc.Token, pubKey, deviceName)
-	if err != nil {
-		return fmt.Errorf("enroll key: %w", err)
-	}
-	cfg, err := configFromAccount(upd, acc.Token, privKey)
+	op, err := NewAccountOperation(configPath, "", 25000, nil)
 	if err != nil {
 		return err
 	}
-	return writeConfig(configPath, cfg)
+	defer op.Close()
+	return op.EnsureRegistered(deviceName)
 }
 
 func configFromAccount(upd *models.AccountData, token string, privKey []byte) (*config.Config, error) {

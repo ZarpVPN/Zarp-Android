@@ -59,11 +59,17 @@ interface WarpAccount {
 
     /** Registers a device if needed. Throws with a readable message on failure. */
     suspend fun ensureRegistered()
+
+    suspend fun ensureRegistered(strategies: List<Strategy>, allowProtected: Boolean, progress: (Int, Int, Strategy) -> Unit) = ensureRegistered()
+    suspend fun readAccount(): WarpAccountType = WarpAccountType.Unknown
+    suspend fun applyLicense(license: String, strategies: List<Strategy>, allowProtected: Boolean,
+        progress: (Int, Int, Strategy) -> Unit): WarpAccountType = throw WarpAccountException("rejected")
 }
 
 /** Other VPNs would carry WARP traffic themselves and make results meaningless. */
 fun interface NetworkInspector {
     fun foreignVpnActive(): Boolean
+    fun internetAvailable(): Boolean = true
 }
 
 /** Persistent state (DataStore in the app, in-memory in tests). */

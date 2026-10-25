@@ -49,6 +49,15 @@ class LangTest {
         assertEquals("missing.key", L.t("missing.key"))
     }
 
+    @Test fun `Persian follows system locale and switches direction with the language`() {
+        L.init(open = { java.io.File("src/main/assets", it).inputStream() }, setting = null, systemLocale = Locale.forLanguageTag("fa-IR"))
+        assertEquals("fa", L.current.value)
+        assertTrue(L.isRtl(L.current.value))
+        assertEquals("تنظیمات", L.t("tab.settings"))
+        L.setLanguage("ru")
+        assertFalse(L.isRtl(L.current.value))
+    }
+
     @Test
     fun `direct strategies are translated, technical names are not`() {
         L.setLanguage("de")

@@ -25,6 +25,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -37,12 +38,16 @@ import io.github.feg55.zarp.core.L
 fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val s = settings ?: return
-    val busy = vm.status.collectAsStateWithLifecycle().value.state.busy
+    val status by vm.status.collectAsStateWithLifecycle()
+    val accountBusy by vm.accountBusy.collectAsStateWithLifecycle()
+    val busy = status.state.busy || accountBusy
     var page by rememberSaveable { mutableStateOf("") }
     BackHandler(page.isNotEmpty()) { page = "" }
     when (page) {
         "apps" -> { AppProxyScreen(vm, { page = "" }, modifier); return }
         "routing" -> { RoutingScreen(vm, { page = "" }, modifier); return }
+        "warpPlus" -> { WarpPlusScreen(vm, { page = "" }, modifier); return }
+        "licenses" -> { LicensesScreen({ page = "" }, modifier); return }
     }
 
     Column(modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp)) {
@@ -60,10 +65,11 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         SectionTitle(L.t("settings.connection"))
         DarkButton(L.t("apps.title"), { page = "apps" }, Modifier.fillMaxWidth())
         DarkButton(L.t("routing.title"), { page = "routing" }, Modifier.fillMaxWidth().padding(top = 8.dp))
+        DarkButton(L.t("warpPlus.title"), { page = "warpPlus" }, Modifier.fillMaxWidth().padding(top = 8.dp))
         SwitchRow(L.t("opt.autoConnect"), s.autoConnect, { v -> vm.updateSettings { it.copy(autoConnect = v) } })
         SwitchRow(L.t("opt.ipv6"), s.tunnelIpv6, { v -> vm.updateSettings { it.copy(tunnelIpv6 = v) } })
         var dns by remember(s.dns) { mutableStateOf(s.dns) }
-        DarkField(dns, { dns = it }, L.t("opt.dns"), singleLine = true)
+        DarkField(dns, { dns = it }, L.t("opt.dns"), singleLine = true, technical = true)
         if (dns != s.dns) {
             DarkButton(L.t("btn.save"), { vm.updateSettings { it.copy(dns = dns.trim()) } }, Modifier.padding(top = 8.dp))
         }
@@ -79,10 +85,11 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         Text(L.t(if (vm.accountRegistered) "opt.deviceOn" else "opt.deviceOff"), color = Zc.Text, fontSize = 15.sp)
         Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             DarkButton(L.t("btn.clearResults"), { vm.clearResults() }, enabled = !busy)
-            DarkButton(L.t("btn.newDevice"), { vm.resetAccount() }, enabled = !busy)
+            DarkButton(L.t("btn.newDevice"), { vm.resetAccount() }, enabled = !busy && status.state != io.github.feg55.zarp.core.EngineState.Connected)
         }
 
         SectionTitle(L.t("settings.about"))
+        DarkButton(L.t("btn.licenses"), { page = "licenses" }, Modifier.fillMaxWidth().padding(bottom = 8.dp))
         Text(L.t("about.text", BuildConfig.VERSION_NAME), color = Zc.TextDim, fontSize = 12.sp, lineHeight = 17.sp)
         Spacer(Modifier.height(24.dp))
     }
@@ -98,6 +105,7 @@ fun DarkField(
     monospace: Boolean = false,
     uriInput: Boolean = false,
     enabled: Boolean = true,
+    technical: Boolean = monospace || uriInput,
 ) {
     OutlinedTextField(
         value = value,
@@ -110,7 +118,9 @@ fun DarkField(
             autoCorrectEnabled = false,
             keyboardType = if (uriInput) KeyboardType.Uri else KeyboardType.Text,
         ),
-        textStyle = TextStyle(fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default, fontSize = if (monospace) 12.sp else 15.sp),
+        textStyle = TextStyle(fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+            fontSize = if (monospace) 12.sp else 15.sp,
+            textDirection = if (technical) TextDirection.Ltr else TextDirection.Content),
         modifier = modifier.fillMaxWidth().padding(top = 6.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = Zc.Accent,

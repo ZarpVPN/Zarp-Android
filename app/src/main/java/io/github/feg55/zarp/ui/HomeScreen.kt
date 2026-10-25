@@ -37,6 +37,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -52,7 +54,8 @@ fun HomeScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier: Modif
     val selectedId by vm.selectedId.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val state = status.state
-    val busy = state.busy
+    val accountBusy by vm.accountBusy.collectAsStateWithLifecycle()
+    val busy = state.busy || accountBusy
 
     val power: @Composable (Dp) -> Unit = { size ->
         PowerButton(
@@ -69,6 +72,7 @@ fun HomeScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier: Modif
                 }
             ),
             onClick = {
+                if (accountBusy) return@PowerButton
                 when {
                     state == EngineState.Connected -> vm.disconnect()
                     busy -> vm.cancel()
@@ -134,7 +138,7 @@ fun HomeScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier: Modif
                 val pingMs = status.pingMs ?: saved?.pingMs
                 InfoRow(L.t("col.protocol"), s?.protocolTitle ?: "-")
                 if (s?.plain == true) Text(L.t("server.plainOnly"), color = androidx.compose.ui.graphics.Color(0xFFFFC857), fontSize = 13.sp)
-                InfoRow(L.t("info.endpoint"), status.endpoint ?: saved?.endpoint ?: "-")
+                InfoRow(L.t("info.endpoint"), status.endpoint ?: saved?.endpoint ?: "-", technical = true)
                 InfoRow(L.t("info.connect"), connectMs?.let { L.t("info.ms", it) } ?: "-")
                 InfoRow(L.t("info.ping"), pingMs?.let { L.t("info.ms", it) } ?: "-")
             }
@@ -150,10 +154,11 @@ fun HomeScreen(vm: MainViewModel, guarded: (() -> Unit) -> Unit, modifier: Modif
 }
 
 @Composable
-private fun InfoRow(label: String, value: String) {
+private fun InfoRow(label: String, value: String, technical: Boolean = false) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label, color = Zc.TextDim, fontSize = 15.sp)
-        Text(value, color = Zc.Text, fontSize = 15.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.End)
+        Text(value, color = Zc.Text, fontSize = 15.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.End,
+            style = TextStyle(textDirection = if (technical) TextDirection.Ltr else TextDirection.Content))
     }
 }
 
