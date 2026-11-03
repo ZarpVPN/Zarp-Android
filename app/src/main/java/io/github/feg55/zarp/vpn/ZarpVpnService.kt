@@ -156,9 +156,16 @@ class ZarpVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        val unexpected = tun != null
         shutdown()
         if (instance === this) instance = null
+        if (unexpected) (application as ZarpApp).engine.onVpnStopped(Msg("detail.vpnRevoked"))
         super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        (application as ZarpApp).engine.onUiClosed()
+        super.onTaskRemoved(rootIntent)
     }
 
     private fun startForegroundCompat(session: String) {

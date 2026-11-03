@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -19,6 +20,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/net/proxy"
 )
 
 func xrayExe(t *testing.T) string {
@@ -184,6 +187,82 @@ func expectTraffic(t *testing.T, p *Proxy) {
 	checkTCP(t, p.SocksPort(), target)
 	checkTCP(t, p.SocksPort(), target)
 	checkUDP(t, p.SocksPort())
+}
+
+// Android embeds both engines: simulate loss of just the bridge while sing-box still listens.
+// The whole chain must close, and the same pair must work after recreating it.
+func TestXhttpBridgeLossAndRecovery(t *testing.T) {
+	srv := startXrayServer(t, obj{"network": "xhttp", "security": "none", "xhttpSettings": obj{"path": "/xh"}})
+	stream := obj{"network": "xhttp", "security": "none", "xhttpSettings": obj{"path": "/xh", "mode": "packet-up"}}
+	opts := serverOptions(srv.port, false, func(o *ServerOptions) {
+		o.SetXrayOutbound(xrayOutboundAt("127.0.0.1", srv.port, stream))
+	})
+	config := configText(t, xhttpClientConfig())
+	start := func() *Proxy {
+		p, err := NewServerProxy(config, opts, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.Close)
+		return p
+	}
+	assertClosed := func(port int) {
+		t.Helper()
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+		if err == nil {
+			_ = conn.Close()
+			t.Fatalf("listener %d survived closing the chain", port)
+		}
+	}
+	target := tcpEcho(t)
+	p := start()
+	checkTCP(t, p.SocksPort(), target)
+	bridgePort := p.bridge.port
+	p.bridge.close()
+	assertClosed(bridgePort)
+	dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", p.SocksPort()), nil, &net.Dialer{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialer.Dial("tcp", target)
+	if err == nil {
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+		_, _ = io.WriteString(conn, "unhealthy")
+		var reply [9]byte
+		if _, err = io.ReadFull(conn, reply[:]); err == nil {
+			t.Fatal("traffic must fail when the bridge is gone")
+		}
+	}
+	p.Close()
+	p.Close() // cleanup is idempotent even when the bridge closed first
+	assertClosed(p.SocksPort())
+	assertClosed(bridgePort)
+	recovered := start()
+	checkTCP(t, recovered.SocksPort(), target)
+}
+
+func TestXhttpFailedProxyStartupReleasesBridge(t *testing.T) {
+	// No server is needed: the failure happens after the bridge starts, before traffic is sent.
+	port, err := freeTestServerPort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := serverOptions(port, false, func(o *ServerOptions) {
+		o.SetXrayOutbound(xrayOutboundAt("127.0.0.1", port, obj{"network": "xhttp", "security": "none"}))
+	})
+	config := xhttpClientConfig()
+	config["outbounds"] = []obj{{"type": "direct", "tag": "proxy"}} // invalid bridge placeholder
+	if p, err := NewServerProxy(configText(t, config), opts, nil); err == nil {
+		p.Close()
+		t.Fatal("invalid proxy configuration must fail")
+	}
+	xrayDialers.mu.RLock()
+	remaining := len(xrayDialers.sessions)
+	xrayDialers.mu.RUnlock()
+	if remaining != 0 {
+		t.Fatalf("failed startup leaked %d bridge sessions", remaining)
+	}
 }
 
 func TestXhttpPlainEveryMode(t *testing.T) {

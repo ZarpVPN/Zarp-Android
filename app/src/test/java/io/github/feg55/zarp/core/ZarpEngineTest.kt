@@ -54,6 +54,9 @@ class ZarpEngineTest {
         var trafficHealthy = true
         var online = true
         var pendingProbe: CompletableDeferred<Unit>? = null
+        var now = 1000L
+        val callbacks = mutableListOf<(Boolean, String) -> Unit>()
+        var onVpnStart: (() -> Unit)? = null
 
         val store = InMemoryStore(settings)
 
@@ -70,6 +73,7 @@ class ZarpEngineTest {
                 onStatus: (Boolean, String) -> Unit,
             ): TunnelHandle {
                 opened += Opened(strategy.id, endpoint, persistent, strategy.transport)
+                if (persistent) callbacks += onStatus
                 when (val o = outcome(strategy.id)) {
                     Outcome.Timeout -> throw TunnelException("timeout after $timeoutMs ms", timeout = true)
                     is Outcome.Works -> {
@@ -96,7 +100,7 @@ class ZarpEngineTest {
         }
 
         val vpn = object : VpnController {
-            override suspend fun start(socksPort: Int, sessionName: String) { vpnStarts += socksPort }
+            override suspend fun start(socksPort: Int, sessionName: String) { vpnStarts += socksPort; onVpnStart?.invoke() }
             override suspend fun stop() { vpnStops++ }
         }
 
@@ -121,10 +125,8 @@ class ZarpEngineTest {
         val engine = ZarpEngine(scope, store, tunnels, probe, vpn, account, object : NetworkInspector {
             override fun foreignVpnActive() = foreignVpn
             override fun internetAvailable() = online
-        }, logs, clock = { 1000L })
+        }, logs, clock = { now })
     }
-
-    private val ids = StrategyCatalog.builtIn.map { it.id }
 
     @Test fun `another VPN warns without refusing WARP scan or connection`() = runTest {
         val env = Env(this, mapOf("warp-q-google6" to listOf(Outcome.Works(100, 20))),
@@ -201,6 +203,134 @@ class ZarpEngineTest {
 
     @Before
     fun setUp() = TestLang.english()
+
+    @Test fun `main button confirms and applies the first working strategy without collecting three`() = runTest {
+        val env = Env(this, mapOf(
+            "warp-q-google6" to listOf(Outcome.Works(900, 100)),
+            "warp-q-google3" to listOf(Outcome.Works(1, 1)),
+        ))
+        env.engine.load()
+        env.engine.connect()
+        advanceUntilIdle()
+        assertEquals(listOf("warp-q-google6", "warp-q-google6", "warp-q-google6"), env.opened.map { it.strategyId })
+        assertEquals(listOf(false, false, true), env.opened.map { it.persistent })
+        assertEquals("warp-q-google6", env.store.selected)
+        assertTrue(env.store.saved.getValue("warp-q-google6").confirmed)
+        assertEquals(3, env.engine.quickStopAfter)
+    }
+
+    @Test fun `main button continues after failed confirmation and failed persistent connection`() = runTest {
+        val env = Env(this, mapOf(
+            "warp-q-google6" to listOf(Outcome.Works(100, 10), Outcome.Timeout),
+            "warp-q-google3" to listOf(Outcome.Works(100, 10), Outcome.Works(100, 10), Outcome.Timeout),
+            "warp-q-vk6" to listOf(Outcome.Works(200, 20)),
+        ))
+        env.engine.load()
+        env.engine.connect()
+        advanceUntilIdle()
+        assertEquals(listOf("warp-q-google6", "warp-q-google6", "warp-q-google3", "warp-q-google3",
+            "warp-q-google3", "warp-q-vk6", "warp-q-vk6", "warp-q-vk6"), env.opened.map { it.strategyId })
+        assertEquals("warp-q-vk6", env.store.selected)
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertFalse(env.store.saved.getValue("warp-q-google3").ok)
+    }
+
+    @Test fun `quick scan never applies a cached result it has not confirmed this time`() = runTest {
+        val env = Env(this, mapOf(
+            "warp-q-google6" to listOf(Outcome.Works(100, 10)),
+            "warp-q-google3" to listOf(Outcome.Works(200, 20)),
+            "warp-q-vk6" to listOf(Outcome.Works(300, 30)),
+            "warp-q-google10" to listOf(Outcome.Works(1, 1)),
+        ))
+        val old = TestResult("warp-q-google10", ok = true, confirmed = true, connectMs = 1, pingMs = 1)
+        env.store.saved = mapOf(old.strategyId to old)
+        env.engine.load()
+        env.engine.search(full = false)
+        advanceUntilIdle()
+        assertTrue(env.opened.none { it.strategyId == old.strategyId })
+        assertEquals("warp-q-google6", env.store.selected)
+        assertEquals(old, env.store.saved[old.strategyId])
+    }
+
+    @Test fun `cancelling before dispatch releases the operation lock`() = runTest {
+        val env = Env(this, mapOf("warp-q-google6" to listOf(Outcome.Works(100, 10))))
+        env.engine.load()
+        assertTrue(env.engine.connect())
+        env.engine.cancel()
+        advanceUntilIdle()
+        assertTrue(env.opened.isEmpty())
+        assertEquals(EngineState.Idle, env.engine.status.value.state)
+        assertTrue(env.engine.connect())
+        advanceUntilIdle()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+    }
+
+    @Test fun `cancelling before loading never erases persisted results`() = runTest {
+        val env = Env(this, emptyMap())
+        val good = TestResult("direct", ok = true, confirmed = true, connectMs = 100, pingMs = 10)
+        env.store.saved = mapOf(good.strategyId to good)
+        env.store.selected = good.strategyId
+        env.engine.connect()
+        env.engine.cancel()
+        advanceUntilIdle()
+        assertEquals(mapOf(good.strategyId to good), env.store.saved)
+        env.engine.load()
+        assertEquals(mapOf(good.strategyId to good), env.engine.results.value)
+        assertEquals(good.strategyId, env.engine.selectedId.value)
+    }
+
+    @Test fun `VPN stop cleanup cannot cancel a newer manual connection`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        env.engine.onVpnStopped(Msg("detail.vpnRevoked"))
+        assertTrue(env.engine.connect())
+        advanceUntilIdle()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertEquals(2, env.vpnStarts.size)
+        assertEquals(1, env.closed)
+    }
+
+    @Test fun `closing the UI cancels scanning without restarting it`() = runTest {
+        val env = Env(this, mapOf("warp-q-google6" to listOf(Outcome.Works(100, 10))))
+        env.engine.load()
+        env.pendingProbe = CompletableDeferred()
+        env.engine.connect()
+        runCurrent()
+        env.engine.onUiClosed()
+        advanceUntilIdle()
+        repeat(5) { env.engine.observeConnection(); advanceUntilIdle() }
+        assertEquals(1, env.opened.size)
+        assertEquals(1, env.closed)
+        assertTrue(env.vpnStarts.isEmpty())
+        assertEquals(EngineState.Idle, env.engine.status.value.state)
+    }
+
+    @Test fun `closing the UI preserves an established VPN and ignores old tunnel callbacks`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        val oldCallback = env.callbacks.single()
+        env.engine.onUiClosed()
+        env.engine.observeConnection()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertEquals(0, env.closed)
+        env.engine.disconnect(); advanceUntilIdle()
+        env.engine.connect(); advanceUntilIdle()
+        oldCallback(false, "old tunnel")
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+    }
+
+    @Test fun `cancellation during VPN startup closes the tunnel and VPN`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        env.engine.load()
+        env.onVpnStart = env.engine::cancel
+        env.engine.connect(); advanceUntilIdle()
+        assertEquals(1, env.closed)
+        assertNull(env.engine.activePair.value)
+        assertEquals(EngineState.Idle, env.engine.status.value.state)
+    }
 
     @Test
     fun `quick scan stops after N working, rechecks them and connects with the best`() = runTest {
@@ -379,7 +509,7 @@ class ZarpEngineTest {
     }
 
     @Test
-    fun `no confirmed strategy works - a new quick scan starts`() = runTest {
+    fun `no confirmed strategy works - search stops at the first newly working strategy`() = runTest {
         val env = Env(this, mapOf("warp-q-google6" to listOf(Outcome.Timeout, Outcome.Works(300, 30))))
         env.store.selected = "warp-q-google6"
         env.engine.load()
@@ -388,7 +518,9 @@ class ZarpEngineTest {
         val order = env.opened.map { it.strategyId }
         assertEquals("warp-q-google6", order[0]) // saved, failed
         assertTrue(order.size > 1 && !env.opened[1].persistent) // then scanning
-        assertEquals(ids.filter { StrategyCatalog.builtIn.single { s -> s.id == it }.supported }.size, env.opened.count { !it.persistent } - 1)
+        assertEquals(listOf(false, false, true), env.opened.drop(1).map { it.persistent })
+        assertTrue(order.all { it == "warp-q-google6" })
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
     }
 
     @Test
@@ -454,6 +586,8 @@ class ZarpEngineTest {
         advanceUntilIdle()
         env.trafficHealthy = false
         env.engine.observeConnection()
+        assertEquals(1, env.vpnStarts.size) // a single failed request is not a broken tunnel
+        env.engine.observeConnection()
         assertEquals(EngineState.Connecting, env.engine.status.value.state)
         env.trafficHealthy = true
         advanceUntilIdle()
@@ -461,6 +595,73 @@ class ZarpEngineTest {
         assertEquals("direct", env.store.selected)
         assertEquals(2, env.vpnStarts.size)
         assertEquals(1, env.closed)
+    }
+
+    @Test fun `background recovery is bounded and never searches or discards verified results`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10), Outcome.Timeout)))
+        env.store.selected = "direct"
+        val good = TestResult("direct", ok = true, confirmed = true, connectMs = 100, pingMs = 10)
+        env.store.saved = mapOf(good.strategyId to good)
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        env.trafficHealthy = false
+        repeat(10) {
+            env.engine.observeConnection(); advanceUntilIdle()
+            env.now += 10_000
+        }
+        assertEquals(4, env.opened.size) // original connection and three recovery attempts
+        assertTrue(env.opened.all { it.persistent && it.strategyId == "direct" })
+        assertEquals(mapOf(good.strategyId to good), env.store.saved)
+        assertEquals("direct", env.store.selected)
+        assertNull(env.engine.activePair.value)
+        assertEquals(EngineState.Error, env.engine.status.value.state)
+    }
+
+    @Test fun `a stalled recovery attempt times out and queued retry can be cancelled`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        env.trafficHealthy = false
+        repeat(2) { env.engine.observeConnection() }
+        env.pendingProbe = CompletableDeferred()
+        runCurrent()
+        assertEquals(2, env.opened.size)
+        assertEquals(1, env.closed)
+        advanceUntilIdle()
+        assertEquals(15_000, testScheduler.currentTime)
+        assertEquals(2, env.closed)
+        assertNull(env.engine.activePair.value)
+        env.engine.cancel()
+        env.now += 30_000
+        env.engine.observeConnection(); advanceUntilIdle()
+        assertEquals(2, env.opened.size)
+        assertEquals(EngineState.Idle, env.engine.status.value.state)
+    }
+
+    @Test fun `closing the UI clears queued recovery and a late unhealthy observation`() = runTest {
+        val env = Env(this, mapOf("direct" to listOf(Outcome.Works(100, 10), Outcome.Timeout, Outcome.Works(100, 10))))
+        env.store.selected = "direct"
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        env.trafficHealthy = false
+        repeat(2) { env.engine.observeConnection(); advanceUntilIdle() }
+        assertEquals(2, env.opened.size)
+        env.engine.onUiClosed()
+        assertEquals(EngineState.Idle, env.engine.status.value.state)
+        env.now += 30_000
+        repeat(5) { env.engine.observeConnection(); advanceUntilIdle() }
+        assertEquals(2, env.opened.size)
+
+        env.trafficHealthy = true
+        env.engine.connect(); advanceUntilIdle()
+        env.pendingProbe = CompletableDeferred()
+        env.trafficHealthy = false
+        val observation = async { env.engine.observeConnection() }
+        runCurrent()
+        env.engine.onUiClosed()
+        env.pendingProbe!!.complete(Unit)
+        advanceUntilIdle()
+        observation.await()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        assertEquals(3, env.opened.size)
     }
 
     @Test fun `an offline link keeps native recovery and verified results intact`() = runTest {

@@ -184,9 +184,29 @@ func TestDeviceVerificationServer(t *testing.T) {
 	metadata, _ := json.Marshal(obj{"reversePort": xrayPort, "httpsPort": httpsPort})
 	_ = os.WriteFile(filepath.Join(dir, "ready.json"), metadata, 0600)
 	t.Log("throwaway XHTTP, Hysteria2 and HTTPS servers are ready")
+	xrayRunning := true
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "stop")); err == nil {
 			break
+		}
+		// A phone check can drop and restore only the test server without changing Wi-Fi or app settings.
+		_, paused := os.Stat(filepath.Join(dir, "pause-xray"))
+		if paused == nil && xrayRunning {
+			_ = xray.Process.Kill()
+			_ = xray.Wait()
+			xrayRunning = false
+			_ = os.WriteFile(filepath.Join(dir, "xray-paused"), []byte("paused"), 0600)
+		} else if os.IsNotExist(paused) && !xrayRunning {
+			xray = exec.Command(xrayExe(t), "run", "-c", xrayFile)
+			xray.Dir = dir
+			if err := xray.Start(); err != nil {
+				t.Fatal("official Xray server could not restart")
+			}
+			if err := waitListening(xrayPort, 10*time.Second); err != nil {
+				t.Fatal("official Xray server did not listen after restarting")
+			}
+			xrayRunning = true
+			_ = os.Remove(filepath.Join(dir, "xray-paused"))
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

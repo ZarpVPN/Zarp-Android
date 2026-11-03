@@ -42,6 +42,7 @@ class DebugCommandReceiver : BroadcastReceiver() {
             }
             "verify-start" -> DebugServerVerifier.start(app)
             "verify-stats" -> DebugServerVerifier.snapshot(app)
+            "verify-observe" -> DebugServerVerifier.observe(app)
             "verify-stop" -> DebugServerVerifier.stop(app)
             "quick" -> engine.search(full = false)
             "full" -> engine.search(full = true)

@@ -99,7 +99,7 @@ class ServerEngineTest {
         }, object : WarpAccount {
             override val registered = false
             override suspend fun ensureRegistered() = error("WARP registration in server mode")
-        }, { foreignVpn }, logs, clock = { 2000 }, refreshServers = refresh, capabilities = capabilities,
+        }, { foreignVpn }, logs, clock = { 2000 + scope.testScheduler.currentTime }, refreshServers = refresh, capabilities = capabilities,
             lifetime = object : OperationLifetime {
                 override suspend fun start() { lifetimeStarted++ }
                 override suspend fun stop() { lifetimeStopped++ }
@@ -156,6 +156,45 @@ class ServerEngineTest {
         assertEquals(mapOf("first.example.com" to 1, "second.example.com" to 1), env.resolverCalls)
         assertEquals(1, env.lifetimeStarted)
         assertEquals(1, env.lifetimeStopped)
+    }
+
+    @Test fun mainButtonContinuesAfterApplyFailureAndQuickScanStillCollectsThreePairs() = runTest {
+        val ids = listOf("warp-t-split", "warp-t-disorder", "warp-t-split-host", "warp-t-split-endhost").map { pair(it) }
+        val config = settings(listOf(firstLink)).copy(stopAfterWorking = 3)
+        val env = Env(this, config, ids.associateWith { listOf(Dpi()) } +
+            (ids[0] to listOf(Dpi(), Dpi(), Dpi(samplesPass = false))))
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        assertEquals(ids[1], env.store.selected)
+        assertEquals(listOf(ids[0], ids[0], ids[0], ids[1], ids[1], ids[1]), env.opened.map { it.first })
+
+        val quick = Env(this, config, ids.associateWith { listOf(Dpi()) })
+        quick.engine.load(); quick.engine.search(full = false); advanceUntilIdle()
+        assertEquals(3, quick.store.saved.values.count { it.confirmed })
+        assertTrue(quick.opened.none { it.first == ids[3] })
+        assertEquals(6, quick.opened.count { !it.second })
+    }
+
+    @Test fun xhttpTrafficFailureTearsDownTheChainAndRetriesOnlyTheSamePairThreeTimes() = runTest {
+        val link = firstLink.replace("security=tls", "security=tls&type=xhttp&path=%2Fxh")
+        val id = pair("warp-t-split", link)
+        val env = Env(this, settings(listOf(link)), mapOf(id to listOf(Dpi())))
+        env.store.selected = id
+        val verified = TestResult(id, ok = true, confirmed = true, connectMs = 40, pingMs = 10)
+        env.store.saved = mapOf(id to verified)
+        env.engine.load(); env.engine.connect(); advanceUntilIdle()
+        assertEquals(EngineState.Connected, env.engine.status.value.state)
+        env.postVpnWorks = false
+        repeat(10) {
+            env.engine.observeConnection(); advanceUntilIdle(); advanceTimeBy(10_000)
+        }
+        assertEquals(4, env.started)
+        assertEquals(4, env.closed)
+        assertEquals(4, env.opened.size)
+        assertTrue(env.opened.all { it.first == id && it.second })
+        assertEquals(mapOf(id to verified), env.store.saved)
+        assertNull(env.engine.activePair.value)
+        assertEquals(EngineState.Error, env.engine.status.value.state)
+        assertEquals(env.lifetimeStarted, env.lifetimeStopped)
     }
 
     @Test fun fullScanTestsEntireUniverseAndAppliesBestScore() = runTest {

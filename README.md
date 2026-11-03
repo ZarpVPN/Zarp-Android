@@ -32,13 +32,14 @@ Join our [Zarp Community](https://github.com/orgs/ZarpVPN/discussions)!
 
 ## Features
 
-- **One button.** The first tap searches for the fastest working strategy, later taps connect right away.
+- **One button.** Connect with the saved strategy, verified alternatives, or the first new strategy that passes two checks and connects. Quick Scan still collects three confirmed strategies by default and chooses the best; Full Scan tests all candidates.
 - **No WARP app needed.** Zarp talks to WARP itself over MASQUE (HTTP/3, with HTTP/2 as a fallback) and registers a free WARP device on first use.
 - **WARP+.** Link an existing subscription in Settings → WARP+ or Server and endpoints → WARP+. Check the account type, apply a masked license key and reconnect. Keys are never stored in settings or logs.
 - **Registration on restricted networks.** If direct registration fails with a network error, eligible TLS strategies are tried against the Cloudflare API. Country filters, the selected strategy and confirmed results determine priority. Registration and tunnel verification remain independent; an interrupted enrollment resumes the same device.
 - **Socket-compatible DPI strategies.** QUIC fakes use the real connection's UDP socket. TLS split/disorder applies to every server dial; QUIC fakes precede the first datagram of every flow.
 - **Honest testing.** Every candidate is checked twice. WARP tests rotate endpoints and require `warp=on` or `warp=plus`; imported servers require a valid HTTPS response through that server.
-- **Self-healing.** If the saved strategy stops working, Zarp tries the other verified ones before searching again. After a network change it reconnects and applies the strategy again.
+- **Self-healing.** Two consecutive failed traffic checks trigger at most three bounded attempts to reconnect the current strategy. Background recovery never starts a new scan or discards verified results. Without Internet, WARP keeps its native reconnect loop. A manual connection can try verified alternatives and search again.
+- **Cancellable searches.** Closing the activity or removing the app from Recents cancels unfinished checks and queued recovery. An established VPN can keep running; rotating the screen or switching to another app keeps a requested search alive.
 - **No root.** A regular Android VPN. Nine WireGuard/raw injection built-ins are removed; raw custom profiles explain their limitations. TTL strategies are disabled when the device cannot set the required socket option.
 - **Per-app proxy.** Settings → Per-app proxy tunnels only selected apps. An empty or uninstalled selection refuses to connect instead of tunneling every app.
 - **Custom servers and subscriptions.** Import VLESS, Trojan or Hysteria2 links, including VLESS XHTTP and TLS ECH, or an HTTPS subscription. Choose one server or Automatic. Subscriptions have an offline cache, refresh and delete controls.
@@ -122,6 +123,7 @@ Apps use the configured VPN DNS servers. The optional proxy/routing engine uses 
 WARP is covered by the [Cloudflare WARP privacy policy](https://www.cloudflare.com/application/privacypolicy/).
 
 See the [Windows release parity audit](docs/windows-release-parity.md) for the release inventory, platform differences and current verification.
+See [strategy search and recovery](docs/strategy-search-recovery.md) for the first-working connection flow, cancellation fixes and bounded Xray/WARP recovery.
 
 ## Building
 

@@ -57,4 +57,9 @@ class MainActivity : ComponentActivity() {
             vpnPermission.launch(intent)
         }
     }
+
+    override fun onDestroy() {
+        if (isFinishing) (application as ZarpApp).engine.onUiClosed()
+        super.onDestroy()
+    }
 }

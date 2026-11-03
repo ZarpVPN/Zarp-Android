@@ -15,6 +15,7 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.TrustManagerFactory
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 
 /** adb-only verification: isolated settings/results, a throwaway server and a pinned test CA. */
@@ -22,6 +23,7 @@ object DebugServerVerifier {
     private var engine: ZarpEngine? = null
     private var handle: TunnelHandle? = null
     private var deadline: Job? = null
+    private var persistentOpens = 0
 
     fun start(app: ZarpApp): Boolean {
         if (engine != null || app.engine.status.value.state.busy || app.engine.activePair.value != null ||
@@ -29,6 +31,7 @@ object DebugServerVerifier {
         app.appScope.launch {
             try {
                 app.privateServerDiagnostics = true
+                persistentOpens = 0
                 val input = Json.parseToJsonElement(File(app.cacheDir, "verification-config.json").readText()).jsonObject
                 val profile = ProxyProfile.parse(input.getValue("link").jsonPrimitive.content)
                 val directHost = input.getValue("directHost").jsonPrimitive.content
@@ -55,7 +58,10 @@ object DebugServerVerifier {
                 val recording = object : TunnelFactory {
                     override fun beginOperation(settings: AppSettings) = real.beginOperation(settings)
                     override suspend fun open(strategy: Strategy, endpoint: String?, timeoutMs: Int, persistent: Boolean, onStatus: (Boolean, String) -> Unit): TunnelHandle =
-                        real.open(strategy, endpoint, timeoutMs, persistent, onStatus).also { handle = it }
+                        real.open(strategy, endpoint, timeoutMs, persistent, onStatus).also {
+                            handle = it
+                            if (persistent) persistentOpens++
+                        }
                 }
                 val verifier = ZarpEngine(app.appScope, store, recording, testProbe(input.getValue("certificate").jsonPrimitive.content), vpn,
                     object : WarpAccount {
@@ -85,6 +91,7 @@ object DebugServerVerifier {
         val m = handle?.metrics()
         File(app.cacheDir, "verification-result.json").writeText(buildJsonObject {
             put("state", current.status.value.state.name)
+            put("persistentOpens", persistentOpens)
             put("errorKey", current.status.value.detail.key)
             put("activePair", current.activePair.value?.id.orEmpty())
             put("connections", m?.connections ?: 0); put("splits", m?.splits ?: 0)
@@ -98,14 +105,23 @@ object DebugServerVerifier {
         return true
     }
 
+    /** Run the normal bounded health/recovery path against the isolated device test session. */
+    fun observe(app: ZarpApp): Boolean {
+        val current = engine ?: return false
+        app.appScope.launch { current.observeConnection(); snapshot(app) }
+        return true
+    }
+
     fun stop(app: ZarpApp): Boolean {
         val current = engine ?: return false
         deadline?.cancel()
         current.cancel()
         app.appScope.launch {
             while (current.status.value.state.busy) delay(50)
-            current.disconnect()
-            while (current.status.value.state != EngineState.Idle && current.status.value.state != EngineState.Error) delay(50)
+            if (current.status.value.state != EngineState.Idle || current.activePair.value != null) {
+                current.disconnect()
+                current.status.first { it.state == EngineState.Idle }
+            }
             snapshot(app)
             engine = null
             handle = null

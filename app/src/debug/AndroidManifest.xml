@@ -2,6 +2,7 @@
 <!-- Debug builds only: drive the engine from adb, e.g.
      adb shell am broadcast -a io.github.feg55.zarp.DEBUG -n io.github.feg55.zarp.debug/io.github.feg55.zarp.DebugCommandReceiver -\-es cmd "test warp-q-google6"
      Commands: quick | full | connect | disconnect | cancel | test <id,id,...> | use <id>
+     verify-start | verify-stats | verify-observe | verify-stop: isolated server lifecycle checks.
      registration-verify | registration-stop: live registration in a separate private config;
      cache/warp-registration-result.json contains only sanitized results. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">

@@ -5,9 +5,9 @@ import io.github.feg55.zarp.net.WarpProbe
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,6 +19,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
+import java.util.concurrent.atomic.AtomicLong
 
 /** An error with a message in the current language. */
 open class ZarpException(val msg: Msg, cause: Throwable? = null) : Exception(msg.toString(), cause)
@@ -72,6 +73,11 @@ class ZarpEngine(
     private var job: Job? = null
     private var accountJob: Job? = null
     private var preserveWarpFailures = false
+    private val generation = AtomicLong()
+    private data class Recovery(val strategy: Strategy, val generation: Long, val attempts: Int = 0, val retryAt: Long = 0)
+    @Volatile private var recovery: Recovery? = null
+    private var probeFailures = 0
+    @Volatile private var activeToken: Any? = null
     @Volatile private var settings = AppSettings()
     val serverMode: Boolean get() = settings.useProxy || _activePair.value?.profile != null
 
@@ -138,7 +144,7 @@ class ZarpEngine(
 
     // ------------------------------------------------------------ top-level scenarios
 
-    /** Main button: connect with the saved strategy, then other confirmed ones, else Quick Scan. */
+    /** Main button: saved strategy, confirmed alternatives, then the first newly confirmed working one. */
     fun connect(): Boolean = launchOp {
         prepare()
         val s = selected
@@ -154,7 +160,7 @@ class ZarpEngine(
             if (settings.useProxy && candidates().size <= 1) return@launchOp
         }
         val list = candidates()
-        searchAndApply(list, quickStopAfter, L.t("log.searchQuick", list.size, quickStopAfter))
+        searchAndApply(list, 1, L.t("log.searchQuick", list.size, 1), connectFirst = true)
     }
 
     /** Quick scan stops after [quickStopAfter] working strategies; Full scan tests all of them. */
@@ -188,15 +194,27 @@ class ZarpEngine(
     }
 
     fun cancel() {
+        val pending = recovery
+        generation.incrementAndGet()
+        recovery = null
         job?.cancel()
         accountJob?.cancel()
+        if (pending != null && job?.isActive != true && active == null) set(EngineState.Idle, Msg("detail.cancelled"))
     }
+
+    /** Closing the UI cancels unfinished checks; an established VPN can keep running. */
+    fun onUiClosed() = cancel()
 
     /** One bounded traffic check; the application schedules it every seven seconds. */
     suspend fun observeConnection() {
         if (busy.isLocked) return
+        recovery?.let { pending ->
+            if (clock() >= pending.retryAt && network.internetAvailable()) recoverConnection(pending)
+            return
+        }
         val tunnel = active ?: return
         val strategy = _activePair.value ?: return
+        val observedGeneration = generation.get()
         // A slow network must not block the user's Disconnect or account commands.
         val observation = withTimeoutOrNull(8_000) {
             try { measure(strategy, tunnel.socksPort, 0) }
@@ -204,21 +222,56 @@ class ZarpEngine(
             catch (_: Exception) { Measurement.NoTraffic(null) }
         }
         if (!busy.tryLock()) return
-        var reconnect = false
+        var pending: Recovery? = null
         try {
-            if (active !== tunnel || _activePair.value != strategy) return
+            if (active !== tunnel || _activePair.value != strategy || generation.get() != observedGeneration) return
             if (observation is Measurement.Ok && tunnel.strategyApplied()) {
+                probeFailures = 0
                 _status.update { it.copy(state = EngineState.Connected, detail = Msg("detail.strategy", strategy.name), pingMs = observation.pingMs) }
             } else {
                 set(EngineState.Connecting, Msg("detail.reconnecting"), strategy)
                 // Keep the native reconnect loop alive while the underlying link
                 // is offline; a scan at that point would only discard good results.
-                reconnect = network.internetAvailable()
+                if (!network.internetAvailable()) probeFailures = 0
+                else if (++probeFailures >= 2) {
+                    pending = Recovery(strategy, observedGeneration)
+                    recovery = pending
+                }
             }
         } finally { busy.unlock() }
-        // The regular flow retries the selected strategy, verified alternatives,
-        // then a fresh scan. Cancellation/disconnection still use the same lock.
-        if (reconnect) connect()
+        pending?.let(::recoverConnection)
+    }
+
+    /** Recovery never scans or invalidates saved results. Three bounded attempts, then wait for the user. */
+    private fun recoverConnection(pending: Recovery) = launchOp(expectedGeneration = pending.generation) {
+        if (recovery !== pending) return@launchOp
+        val strategy = candidates().firstOrNull { it.id == pending.strategy.id }
+        if (strategy == null || network.foreignVpnActive()) {
+            recovery = null
+            stopAll()
+            set(EngineState.Error, Msg(if (strategy == null) "detail.connectFailed" else "server.otherVpn"))
+            return@launchOp
+        }
+        val attempt = pending.attempts + 1
+        val connected = try {
+            tunnels.beginOperation(settings)
+            withTimeoutOrNull(15_000) { apply(strategy) } == true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            log.write(L.t("log.error", if (strategy.isWarp) L.t("detail.connectFailed") else ServerErrors.describe("", e.message.orEmpty()).toString()))
+            false
+        }
+        coroutineContext.ensureActive()
+        if (connected) {
+            recovery = null
+            probeFailures = 0
+        } else {
+            stopAll()
+            recovery = if (attempt < 3) pending.copy(attempts = attempt, retryAt = clock() + attempt * 1000L) else null
+            set(if (recovery == null) EngineState.Error else EngineState.Connecting,
+                Msg(if (recovery == null) "detail.connectFailed" else "detail.reconnecting"))
+        }
     }
 
     /** Account commands share the operation lock and keep an active tunnel intact. */
@@ -251,12 +304,17 @@ class ZarpEngine(
 
     /** The VPN went away (revoked by the system or another VPN app, or stopped from the notification). */
     fun onVpnStopped(reason: Msg) {
+        val stoppedJob = job
+        cancel()
+        val stoppedGeneration = generation.get()
         scope.launch {
-            job?.cancelAndJoin()
+            stoppedJob?.join()
             busy.withLock {
+                if (generation.get() != stoppedGeneration) return@withLock
                 val had = active != null
                 active?.close()
                 active = null
+                activeToken = null
                 _activePair.value = null
                 if (had) {
                     log.write(reason.toString())
@@ -266,21 +324,39 @@ class ZarpEngine(
         }
     }
 
-    private fun launchOp(body: suspend () -> Unit): Boolean {
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    private fun launchOp(expectedGeneration: Long? = null, body: suspend () -> Unit): Boolean {
         if (!busy.tryLock()) return false // already busy
-        job = scope.launch {
+        if (expectedGeneration != null && generation.get() != expectedGeneration) {
+            busy.unlock()
+            return false
+        }
+        if (expectedGeneration == null) {
+            generation.incrementAndGet()
+            recovery = null
+            probeFailures = 0
+        }
+        val operationGeneration = generation.get()
+        // Cancellation before dispatch must still enter finally and release the operation lock.
+        job = scope.launch(start = CoroutineStart.ATOMIC) {
             try {
+                coroutineContext.ensureActive()
                 loaded.await()
                 settings = store.settings()
                 reloadStrategies()
                 pruneSavedState()
                 lifetime?.start()
+                if (generation.get() != operationGeneration) throw CancellationException("operation cancelled")
                 body()
             } catch (e: CancellationException) {
+                recovery = null
                 log.write(L.t("log.cancelled"))
-                withContext(NonCancellable) { saveResults(); stopAll() }
+                withContext(NonCancellable) {
+                    try { if (loaded.isCompleted) saveResults() } finally { stopAll() }
+                }
                 set(EngineState.Idle, Msg("detail.cancelled"))
             } catch (e: Exception) {
+                recovery = null
                 val msg = (e as? ZarpException)?.msg ?: if (settings.useProxy) ServerErrors.describe("", e.message.orEmpty())
                     else Msg("detail.error", e.message ?: e.javaClass.simpleName)
                 log.write(L.t("log.error", msg.toString()))
@@ -392,16 +468,16 @@ class ZarpEngine(
     }
 
     /** @param stopAfter stop phase 1 after this many working strategies; 0 = test all. */
-    private suspend fun searchAndApply(list: List<Strategy>, stopAfter: Int, title: String) {
-        if (settings.useProxy) {
-            searchServerPairs(list, stopAfter, title)
+    private suspend fun searchAndApply(list: List<Strategy>, stopAfter: Int, title: String, connectFirst: Boolean = false) {
+        if (settings.useProxy || connectFirst) {
+            searchInline(list, stopAfter, title, connectFirst)
             return
         }
         log.write(title)
         var scanned = 0
         var confirmedCount = 0
         var hadCandidates = false
-        val scannedIds = list.map { it.id }.toSet()
+        val confirmedIds = mutableSetOf<String>()
 
         do {
             val candidates = mutableListOf<Pair<Strategy, TestResult>>()
@@ -439,6 +515,7 @@ class ZarpEngine(
                     if (r2.ok) {
                         val merged = TestResult.confirmed(r1, r2)
                         putResult(merged)
+                        confirmedIds += s.id
                         confirmedCount++
                         log.write("  " + L.t("log.recheckOk", s.name, r2.connectMs, r2.pingMs))
                     } else {
@@ -452,7 +529,7 @@ class ZarpEngine(
         // A failed confirmation does not consume Quick Scan's working quota.
         } while (stopAfter > 0 && scanned < list.size && confirmedCount < stopAfter)
 
-        val confirmed = confirmedStrategies(except = null).filter { it.id in scannedIds }
+        val confirmed = confirmedStrategies(except = null).filter { it.id in confirmedIds }
         if (confirmed.isEmpty()) {
             stopAll()
             log.write(
@@ -469,18 +546,19 @@ class ZarpEngine(
         if (!applyFirstWorking(confirmed)) set(EngineState.Error, Msg("detail.foundButFailed"))
     }
 
-    /** Server pairs are confirmed inline; Quick Scan counts confirmed pairs only. */
-    private suspend fun searchServerPairs(list: List<Strategy>, stopAfter: Int, title: String) {
+    /** Confirm immediately; the main button also applies immediately and continues if applying fails. */
+    private suspend fun searchInline(list: List<Strategy>, stopAfter: Int, title: String, connectFirst: Boolean) {
         log.write(title)
         setProgress(0, list.size)
         var confirmedCount = 0
+        val confirmedIds = mutableSetOf<String>()
         for ((index, s) in list.withIndex()) {
             coroutineContext.ensureActive()
             set(EngineState.Searching, Msg("detail.testing", index + 1, list.size, s.name), strategy = s)
             val first = test(s)
             var result = first
             if (first.ok) {
-                set(EngineState.Searching, Msg("detail.confirmingPair", index + 1, list.size, s.name), strategy = s)
+                set(EngineState.Searching, Msg(if (s.isWarp) "detail.rechecking" else "detail.confirmingPair", index + 1, list.size, s.name), strategy = s)
                 val second = test(s)
                 result = if (second.ok) TestResult.confirmed(first, second) else second.copy(rechecked = true)
             }
@@ -489,10 +567,22 @@ class ZarpEngine(
             setProgress(index + 1, list.size)
             log.write(if (result.ok) L.t("log.recheckOk", s.logName, result.connectMs, result.pingMs)
                 else L.t("log.testFail", s.logName, result.logError))
-            if (result.ok && ++confirmedCount >= stopAfter && stopAfter > 0) break
+            if (result.ok && result.confirmed) {
+                confirmedCount++
+                confirmedIds += s.id
+                if (connectFirst) {
+                    if (applyFirstWorking(listOf(s))) return
+                    continue
+                }
+                if (stopAfter > 0 && confirmedCount >= stopAfter) break
+            }
         }
-        val scanned = list.map { it.id }.toSet()
-        val ordered = confirmedStrategies(null).filter { it.id in scanned }
+        val ordered = confirmedStrategies(null).filter { it.id in confirmedIds }
+        if (connectFirst) {
+            stopAll()
+            set(EngineState.Error, Msg(if (confirmedCount > 0) "detail.foundButFailed" else "detail.notFound"))
+            return
+        }
         if (ordered.isEmpty()) {
             stopAll()
             set(EngineState.Error, Msg("detail.notFound"))
@@ -538,10 +628,11 @@ class ZarpEngine(
         }
 
         val timeoutMs = maxOf(30, settings.testTimeoutSec * 2) * 1000
+        val token = Any()
         val custom = if (s.isWarp) EndpointParser.parse(settings.customEndpoints) else emptyList()
         val endpoint = if (s.isWarp) _results.value[s.id]?.endpoint?.takeIf { it in custom } ?: custom.firstOrNull() else null
         val tunnel = try {
-            tunnels.open(s, endpoint, timeoutMs, persistent = true, onStatus = ::onTunnelStatus)
+            tunnels.open(s, endpoint, timeoutMs, persistent = true, onStatus = { connected, message -> onTunnelStatus(token, connected, message) })
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -578,6 +669,7 @@ class ZarpEngine(
             if (!s.isWarp && probe.probeProxy(tunnel.socksPort) !is Measurement.Ok) {
                 throw ZarpException(tunnel.failure() ?: Msg("server.err.other"))
             }
+            coroutineContext.ensureActive()
         } catch (e: Throwable) {
             tunnel.close()
             withContext(NonCancellable) { vpn.stop() }
@@ -587,6 +679,7 @@ class ZarpEngine(
                 else VpnStartException(e.message ?: e.javaClass.simpleName, e)
         }
         active = tunnel
+        activeToken = token
         _activePair.value = s
         val connectMs = m.firstResponseMs ?: tunnel.connectMs
         log.write(L.t(if (s.isWarp) "log.warpConnected" else "log.proxyConnected", connectMs, m.pingMs,
@@ -601,8 +694,8 @@ class ZarpEngine(
     private suspend fun measure(strategy: Strategy, port: Int, samples: Int): Measurement =
         if (strategy.isWarp) probe.measure(port, samples) else probe.measureProxy(port, samples)
 
-    private fun onTunnelStatus(connected: Boolean, message: String) {
-        if (active == null) return
+    private fun onTunnelStatus(token: Any, connected: Boolean, message: String) {
+        if (active == null || activeToken !== token) return
         _status.update {
             if (connected) it.copy(state = EngineState.Connected, detail = Msg("detail.strategy", it.strategy?.name.orEmpty()))
             else it.copy(state = EngineState.Connecting, detail = Msg("detail.reconnecting"))
@@ -612,9 +705,9 @@ class ZarpEngine(
     private suspend fun stopAll() {
         val t = active
         active = null
+        activeToken = null
         _activePair.value = null
-        t?.close()
-        vpn.stop()
+        try { t?.close() } finally { vpn.stop() }
     }
 
     // ------------------------------------------------------------ state helpers

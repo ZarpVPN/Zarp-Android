@@ -92,6 +92,9 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             # release already exists (tag pushed again, or created on the web): replace the files, keep the notes
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          elif [ -f "docs/releases/${GITHUB_REF_NAME}.md" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* --title "Zarp for Android $GITHUB_REF_NAME" \
+              --notes-file "docs/releases/${GITHUB_REF_NAME}.md"
           else
             gh release create "$GITHUB_REF_NAME" dist/* --title "Zarp for Android $GITHUB_REF_NAME" --generate-notes
           fi
