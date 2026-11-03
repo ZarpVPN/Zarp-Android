@@ -92,11 +92,23 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             # release already exists (tag pushed again, or created on the web): replace the files, keep the notes
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
-          elif [ -f "docs/releases/${GITHUB_REF_NAME}.md" ]; then
-            gh release create "$GITHUB_REF_NAME" dist/* --title "Zarp for Android $GITHUB_REF_NAME" \
-              --notes-file "docs/releases/${GITHUB_REF_NAME}.md"
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --title "Zarp for Android $GITHUB_REF_NAME" --generate-notes
+            APK_NAME="Zarp-${GITHUB_REF_NAME}.apk"
+            APK="dist/$APK_NAME"
+            APK_SIZE=$(awk -v bytes="$(stat -c%s "$APK")" 'BEGIN { printf "%.2f", bytes / 1000000 }')
+            APK_SHA256=$(sha256sum "$APK" | cut -d ' ' -f 1)
+            CERT_SHA256=$("$ANDROID_HOME/build-tools/36.1.0/apksigner" verify --print-certs "$APK" |
+              sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+            test -n "$CERT_SHA256"
+            RELEASE_NOTES="$(
+              printf '**Requirements:** Android 8.0 or later, arm64, armv7 or x86_64.  \n'
+              printf '**APK size:** %s MB.\n\n' "$APK_SIZE"
+              printf '**%s SHA-256:** `%s`\n\n' "$APK_NAME" "$APK_SHA256"
+              printf '**Signing certificate SHA-256:** `%s`\n\n' "$CERT_SHA256"
+              printf 'Check the signature with:\n\n```bash\napksigner verify --print-certs %s\n```\n\n' "$APK_NAME"
+            )"
+            gh release create "$GITHUB_REF_NAME" dist/* --title "Zarp for Android $GITHUB_REF_NAME" \
+              --notes "$RELEASE_NOTES" --generate-notes
           fi
 
       - name: Remove keystore
