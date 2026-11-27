@@ -39,7 +39,7 @@ class ZarpEngineTest {
 
     private class Opened(val strategyId: String, val endpoint: String?, val persistent: Boolean, val transport: Transport)
 
-    private class Env(scope: TestScope, private val script: Map<String, List<Outcome>>, settings: AppSettings = AppSettings(tosAccepted = true), foreignVpn: Boolean = false) {
+    private class Env(scope: TestScope, private val script: Map<String, List<Outcome>>, settings: AppSettings = AppSettings(tosAccepted = true), var foreignVpn: Boolean = false) {
         val opened = mutableListOf<Opened>()
         val vpnStarts = mutableListOf<Int>()
         var vpnStops = 0
@@ -50,6 +50,8 @@ class ZarpEngineTest {
         var accountStrategies = emptyList<Strategy>()
         var protectedRegistration = false
         var accountFailure = false
+        var accountRegistered = true
+        var vpnRegistrations = 0
         var accountType = WarpAccountType.Free
         var trafficHealthy = true
         var online = true
@@ -105,12 +107,17 @@ class ZarpEngineTest {
         }
 
         val account = object : WarpAccount {
-            override var registered = true
+            override val registered get() = accountRegistered
             override suspend fun ensureRegistered() = Unit
             override suspend fun ensureRegistered(strategies: List<Strategy>, allowProtected: Boolean, progress: (Int, Int, Strategy) -> Unit) {
                 accountStrategies = strategies
                 protectedRegistration = allowProtected
                 if (accountFailure) throw WarpAccountException("network")
+                accountRegistered = true
+            }
+            override suspend fun ensureRegisteredViaVpn() {
+                vpnRegistrations++
+                accountRegistered = true
             }
             override suspend fun readAccount() = accountType
             override suspend fun applyLicense(license: String, strategies: List<Strategy>, allowProtected: Boolean,
@@ -545,6 +552,7 @@ class ZarpEngineTest {
         env.store.selected = "warp-t-split-host"
         env.store.saved = mapOf("warp-t-split-endhost" to TestResult("warp-t-split-endhost", ok = true, confirmed = true))
         env.accountFailure = true
+        env.accountRegistered = false
         env.engine.load()
         val before = env.store.saved
         env.engine.connect()
@@ -556,6 +564,27 @@ class ZarpEngineTest {
         assertTrue(env.accountStrategies.all { it.transport == Transport.MasqueH2 && it.supported && it.usesDesync })
         assertEquals(before, env.store.saved)
         assertTrue(env.protectedRegistration)
+    }
+
+    @Test fun `WARP registration can be retried through another VPN without starting Zarp VPN or scanning`() = runTest {
+        val env = Env(this, emptyMap())
+        env.accountRegistered = false
+        env.accountFailure = true
+        env.engine.load()
+        val failure = runCatching { env.engine.registerWarp(viaVpn = false) }.exceptionOrNull() as WarpAccountException
+        assertTrue(failure.canRetryViaVpn)
+        assertEquals(EngineState.Error, env.engine.status.value.state)
+        val unavailable = runCatching { env.engine.registerWarp(viaVpn = true) }.exceptionOrNull() as WarpAccountException
+        assertEquals("vpnUnavailable", unavailable.code)
+        assertEquals(0, env.vpnRegistrations)
+        env.foreignVpn = true
+        env.engine.registerWarp(viaVpn = true)
+        assertEquals(1, env.vpnRegistrations)
+        assertTrue(env.accountRegistered)
+        assertEquals(EngineState.Idle, env.engine.status.value.state)
+        assertTrue(env.opened.isEmpty())
+        assertTrue(env.vpnStarts.isEmpty())
+        assertEquals(0, env.vpnStops)
     }
 
     @Test fun `account commands preserve an active connection selection and results`() = runTest {

@@ -1,12 +1,16 @@
 package io.github.feg55.zarp.ui
 
 import android.app.Application
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.feg55.zarp.ZarpApp
 import io.github.feg55.zarp.core.AppSettings
 import io.github.feg55.zarp.core.L
 import io.github.feg55.zarp.core.Strategy
+import io.github.feg55.zarp.core.ZarpException
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -43,6 +47,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         .flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val accountRegistered: Boolean get() = zarp.account.registered
+    var registrationFailure by mutableStateOf<ZarpException?>(null)
     val geoFiles = zarp.geoData.files
     fun geoKey(kind: String, url: String) = zarp.geoData.key(kind, url)
     fun refreshGeo(settings: RoutingSettings) { viewModelScope.launch { zarp.geoData.refresh(settings) } }

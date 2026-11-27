@@ -61,6 +61,7 @@ interface WarpAccount {
     suspend fun ensureRegistered()
 
     suspend fun ensureRegistered(strategies: List<Strategy>, allowProtected: Boolean, progress: (Int, Int, Strategy) -> Unit) = ensureRegistered()
+    suspend fun ensureRegisteredViaVpn(): Unit = throw WarpAccountException("vpnUnavailable")
     suspend fun readAccount(): WarpAccountType = WarpAccountType.Unknown
     suspend fun applyLicense(license: String, strategies: List<Strategy>, allowProtected: Boolean,
         progress: (Int, Int, Strategy) -> Unit): WarpAccountType = throw WarpAccountException("rejected")

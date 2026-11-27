@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -18,7 +19,7 @@ import (
 	"github.com/Diniboy1123/usque/pub"
 )
 
-// AccountProtector excludes only this operation's HTTPS sockets from an active VPN.
+// AccountProtector configures routing for only this operation's HTTPS sockets.
 type AccountProtector interface{ Protect(fd int) bool }
 
 // AccountOperation is cancellable and owns a private HTTPS transport. TLS strategies
@@ -72,7 +73,7 @@ func NewAccountOperation(configPath, tcpDesync string, timeoutMs int, protector 
 		Proxy: nil, ForceAttemptHTTP2: false, DisableKeepAlives: true,
 		TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 15 * time.Second,
 	}
-	tr.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+	tr.DialTLSContext = func(_ context.Context, _, address string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(address)
 		if err != nil || host != "api.cloudflareclient.com" || port != "443" {
 			return nil, errors.New("account:destination")
@@ -105,7 +106,11 @@ func NewAccountOperation(configPath, tcpDesync string, timeoutMs int, protector 
 func dialAccountTLS(ctx context.Context, dialer *net.Dialer, address, host string, spec *desyncSpec) (net.Conn, error) {
 	raw, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
-		return nil, err
+		var dns *net.DNSError
+		if errors.As(err, &dns) {
+			return nil, &accountTransportError{"dns", err}
+		}
+		return nil, &accountTransportError{"tcp", err}
 	}
 	var conn net.Conn = raw
 	if spec != nil {
@@ -114,7 +119,7 @@ func dialAccountTLS(ctx context.Context, dialer *net.Dialer, address, host strin
 	secured := tls.Client(conn, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}})
 	if err = secured.HandshakeContext(ctx); err != nil {
 		raw.Close()
-		return nil, err
+		return nil, &accountTransportError{"tls", err}
 	}
 	return secured, nil
 }
@@ -128,6 +133,28 @@ type pendingAccount struct {
 	PublicKey  []byte `json:"public_key"`
 }
 
+type accountTransportError struct {
+	stage string
+	err   error
+}
+
+func (e *accountTransportError) Error() string { return e.err.Error() }
+func (e *accountTransportError) Unwrap() error { return e.err }
+
+// Only the stage, normalized category and numeric HTTP status cross JNI.
+func registrationError(stage string, err error) error {
+	var transport *accountTransportError
+	if errors.As(err, &transport) {
+		stage = transport.stage
+	}
+	code := accountError(err)
+	var response *api.ResponseError
+	if errors.As(err, &response) {
+		return fmt.Errorf("%s:%s:%d", code, stage, response.Status)
+	}
+	return fmt.Errorf("%s:%s", code, stage)
+}
+
 func (o *AccountOperation) EnsureRegistered(deviceName string) error {
 	select {
 	case accountConfigLock <- struct{}{}:
@@ -138,7 +165,7 @@ func (o *AccountOperation) EnsureRegistered(deviceName string) error {
 	if HasAccount(o.path) {
 		return nil
 	}
-	return accountError(o.register(deviceName))
+	return o.register(deviceName)
 }
 
 func (o *AccountOperation) register(deviceName string) error {
@@ -146,46 +173,67 @@ func (o *AccountOperation) register(deviceName string) error {
 	// resumes PATCH rather than creating another device and consuming quota.
 	var pending pendingAccount
 	data, err := os.ReadFile(o.path + ".pending")
-	if err == nil {
+	resumed := err == nil
+	if resumed {
 		if json.Unmarshal(data, &pending) != nil || pending.ID == "" || pending.Token == "" || len(pending.PrivateKey) == 0 || len(pending.PublicKey) == 0 {
-			return errors.New("account:config")
+			return errors.New("account:config:save")
 		}
 	} else if !os.IsNotExist(err) {
-		return errors.New("account:config")
+		return errors.New("account:config:save")
 	} else {
-		priv, pubKey, err := pub.GenerateEcKeyPair()
-		if err != nil {
-			return errors.New("account:config")
-		}
-		acc, err := o.client.Register(o.ctx, registerModel, registerLocale)
+		pending, err = o.createPendingAccount()
 		if err != nil {
 			return err
 		}
-		if acc.ID == "" || acc.Token == "" {
-			return errors.New("account:response")
-		}
-		pending = pendingAccount{acc.ID, acc.Token, priv, pubKey}
-		data, _ = json.Marshal(pending)
-		if err := writeAccountFile(o.path+".pending", data); err != nil {
-			return errors.New("account:config")
-		}
 	}
 	upd, err := o.client.EnrollKey(o.ctx, pending.ID, pending.Token, pending.PublicKey, deviceName)
+	var response *api.ResponseError
+	if resumed && errors.As(err, &response) && (response.Status == 401 || response.Status == 404 || response.Status == 410) {
+		// The saved device or token is no longer valid. Retry with one new identity.
+		if err := os.Remove(o.path + ".pending"); err != nil {
+			return errors.New("account:config:save")
+		}
+		pending, err = o.createPendingAccount()
+		if err != nil {
+			return err
+		}
+		upd, err = o.client.EnrollKey(o.ctx, pending.ID, pending.Token, pending.PublicKey, deviceName)
+	}
 	if err != nil {
-		return err
+		return registrationError("enroll", err)
 	}
 	if upd.ID != pending.ID {
-		return errors.New("account:response")
+		return errors.New("account:response:enroll")
 	}
 	cfg, err := configFromAccount(upd, pending.Token, pending.PrivateKey)
 	if err != nil {
-		return errors.New("account:response")
+		return errors.New("account:response:enroll")
 	}
 	if err := writeConfig(o.path, cfg); err != nil {
-		return errors.New("account:config")
+		return errors.New("account:config:save")
 	}
 	_ = os.Remove(o.path + ".pending")
 	return nil
+}
+
+func (o *AccountOperation) createPendingAccount() (pendingAccount, error) {
+	priv, pubKey, err := pub.GenerateEcKeyPair()
+	if err != nil {
+		return pendingAccount{}, errors.New("account:config:save")
+	}
+	acc, err := o.client.Register(o.ctx, registerModel, registerLocale)
+	if err != nil {
+		return pendingAccount{}, registrationError("register", err)
+	}
+	if acc.ID == "" || acc.Token == "" {
+		return pendingAccount{}, errors.New("account:response:register")
+	}
+	pending := pendingAccount{acc.ID, acc.Token, priv, pubKey}
+	data, _ := json.Marshal(pending)
+	if err := writeAccountFile(o.path+".pending", data); err != nil {
+		return pendingAccount{}, errors.New("account:config:save")
+	}
+	return pending, nil
 }
 
 func writeAccountFile(path string, data []byte) error {
@@ -265,6 +313,10 @@ func accountError(err error) error {
 	}
 	if errors.Is(err, errAccountProtect) {
 		return errAccountProtect
+	}
+	var transport *accountTransportError
+	if errors.As(err, &transport) && transport.stage == "tls" {
+		return errors.New("account:network")
 	}
 	var status *api.ResponseError
 	if errors.As(err, &status) {

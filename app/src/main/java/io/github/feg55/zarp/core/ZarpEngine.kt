@@ -295,12 +295,41 @@ class ZarpEngine(
         }
     }
 
+    /** Registers against Cloudflare without preparing or starting the Android VPN. */
+    suspend fun registerWarp(viaVpn: Boolean) {
+        if (!busy.tryLock()) throw ZarpException(Msg("warpPlus.busy"))
+        accountJob = coroutineContext[Job]
+        var started = false
+        try {
+            loaded.await()
+            settings = store.settings()
+            if (account.registered) return
+            if (active != null) throw ZarpException(Msg("warpPlus.busy"))
+            set(EngineState.Preparing, Msg("warpRegistration.working"))
+            started = true
+            lifetime?.start()
+            ensureWarpRegistered(viaVpn)
+            set(EngineState.Idle, Msg("log.warpRegistered"))
+        } catch (e: CancellationException) {
+            if (started) set(EngineState.Idle, Msg("detail.cancelled"))
+            throw e
+        } catch (e: Exception) {
+            if (started) set(EngineState.Error, (e as? ZarpException)?.msg ?: Msg("detail.registerFailed"))
+            throw e
+        } finally {
+            if (started) withContext(NonCancellable) { runCatching { lifetime?.stop() } }
+            accountJob = null
+            busy.unlock()
+        }
+    }
+
     /** API candidates are never server pairs and never become verified tunnel results. */
     private fun registrationStrategies(): List<Strategy> =
         StrategyFilter.apply(StrategyCatalog.load(settings.customStrategies).map(::withCapabilities), settings.strategyCountry)
             .filter { it.isWarp && it.supported && it.transport == Transport.MasqueH2 && !it.plan.tcpDesync.isNullOrEmpty() }
             .sortedWith(compareByDescending<Strategy> { it.id == _selectedId.value }
-                .thenByDescending { _results.value[it.id]?.let { r -> r.ok && r.confirmed } == true })
+                .thenByDescending { _results.value[it.id]?.let { r -> r.ok && r.confirmed } == true }
+                .thenByDescending { it.plan.tcpDesync == "disorder:1,midsld" })
 
     /** The VPN went away (revoked by the system or another VPN app, or stopped from the notification). */
     fun onVpnStopped(reason: Msg) {
@@ -401,17 +430,27 @@ class ZarpEngine(
         }
         tunnels.beginOperation(settings)
         EndpointParser.parse(settings.customEndpoints)
-        if (!account.registered) log.write(L.t("log.warpRegistering"))
+        ensureWarpRegistered(viaVpn = network.foreignVpnActive())
+    }
+
+    private suspend fun ensureWarpRegistered(viaVpn: Boolean) {
+        if (account.registered) return
+        log.write(L.t(if (viaVpn) "log.warpRegisteringViaVpn" else "log.warpRegistering"))
         try {
-            account.ensureRegistered(registrationStrategies(), !network.foreignVpnActive()) { done, total, strategy ->
-                set(EngineState.Preparing, Msg("detail.warpRegistrationStrategy", done, total, strategy.name))
+            if (viaVpn) {
+                if (!network.foreignVpnActive()) throw WarpAccountException("vpnUnavailable")
+                account.ensureRegisteredViaVpn()
+            } else {
+                account.ensureRegistered(registrationStrategies(), !network.foreignVpnActive()) { done, total, strategy ->
+                    set(EngineState.Preparing, Msg("detail.warpRegistrationStrategy", done, total, strategy.name))
+                }
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val reason = (e as? ZarpException)?.msg?.toString() ?: e.message.orEmpty()
-            log.write(L.t("log.warpRegisterFailed", reason))
-            throw ZarpException(Msg("detail.registerFailed"), e)
+            val failure = e as? ZarpException ?: ZarpException(Msg("detail.registerFailed"), e)
+            log.write(L.t("log.warpRegisterFailed", failure.msg))
+            throw failure
         }
     }
 

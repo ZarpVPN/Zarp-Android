@@ -50,6 +50,7 @@ fun WarpPlusScreen(vm: MainViewModel, back: () -> Unit, modifier: Modifier = Mod
             message = Msg("detail.cancelled")
             throw e
         } catch (e: Exception) {
+            if (license != null && !vm.accountRegistered && e is WarpAccountException) vm.registrationFailure = e
             account = WarpAccountType.Unknown
             message = (e as? ZarpException)?.msg ?: Msg(if (license == null) "warpPlus.accountFailed" else "warpPlus.applyFailed")
             error = true

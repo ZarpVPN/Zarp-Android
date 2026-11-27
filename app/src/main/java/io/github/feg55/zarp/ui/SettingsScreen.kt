@@ -32,15 +32,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.feg55.zarp.BuildConfig
+import io.github.feg55.zarp.core.EngineState
 import io.github.feg55.zarp.core.L
 
 @Composable
-fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
+fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier, registerWarp: () -> Unit) {
     val settings by vm.settings.collectAsStateWithLifecycle()
     val s = settings ?: return
     val status by vm.status.collectAsStateWithLifecycle()
     val accountBusy by vm.accountBusy.collectAsStateWithLifecycle()
     val busy = status.state.busy || accountBusy
+    var deviceRegistered by remember(status, accountBusy) { mutableStateOf(vm.accountRegistered) }
     var page by rememberSaveable { mutableStateOf("") }
     BackHandler(page.isNotEmpty()) { page = "" }
     when (page) {
@@ -82,10 +84,18 @@ fun SettingsScreen(vm: MainViewModel, modifier: Modifier = Modifier) {
         }
 
         SectionTitle(L.t("settings.data"))
-        Text(L.t(if (vm.accountRegistered) "opt.deviceOn" else "opt.deviceOff"), color = Zc.Text, fontSize = 15.sp)
+        Text(L.t(if (deviceRegistered) "opt.deviceOn" else "opt.deviceOff"), color = Zc.Text, fontSize = 15.sp)
+        if (!deviceRegistered) {
+            val preparing = status.state == EngineState.Preparing
+            if (preparing) SettingsHint(status.detail.toString())
+            DarkButton(L.t(if (preparing) "btn.cancel" else "warpRegistration.start"),
+                if (preparing) ({ vm.cancel() }) else registerWarp, Modifier.fillMaxWidth().padding(top = 8.dp),
+                enabled = preparing || (!busy && status.state != EngineState.Connected))
+        }
         Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             DarkButton(L.t("btn.clearResults"), { vm.clearResults() }, enabled = !busy)
-            DarkButton(L.t("btn.newDevice"), { vm.resetAccount() }, enabled = !busy && status.state != io.github.feg55.zarp.core.EngineState.Connected)
+            DarkButton(L.t("btn.newDevice"), { vm.resetAccount(); deviceRegistered = vm.accountRegistered },
+                enabled = !busy && status.state != EngineState.Connected)
         }
 
         SectionTitle(L.t("settings.about"))

@@ -26,15 +26,18 @@ class MasqueAccount(
     private val settings: suspend () -> AppSettings,
     private val log: LogBus,
     private val protector: SocketProtector,
+    private val foreignVpnRoute: () -> SocketProtector?,
 ) : WarpAccount {
 
     override val registered: Boolean get() = Zarpcore.hasAccount(configFile.absolutePath)
 
-    private val manager = WarpAccountManager(
+    private val manager = manager(protector)
+
+    private fun manager(route: SocketProtector, viaVpn: Boolean = false) = WarpAccountManager(
         sessions = { strategy ->
             val op = Zarpcore.newAccountOperation(configFile.absolutePath, strategy?.plan?.tcpDesync.orEmpty(), 25_000,
-                AccountProtector { fd -> protector.protect(fd.toInt()) })
-            NativeSession(op)
+                AccountProtector { fd -> route.protect(fd.toInt()) })
+            NativeSession(op, viaVpn)
         },
         registered = { registered },
         log = log,
@@ -49,11 +52,20 @@ class MasqueAccount(
         log.write(L.t("log.warpRegistered"))
     }
 
+    override suspend fun ensureRegisteredViaVpn() {
+        if (registered) return
+        if (!settings().tosAccepted) throw ZarpException(Msg("err.tos"))
+        val route = foreignVpnRoute() ?: throw WarpAccountException("vpnUnavailable")
+        manager(route, viaVpn = true).ensure(emptyList(), false)
+        log.write(L.t("log.warpRegistered"))
+    }
+
     override suspend fun readAccount() = manager.read()
 
     override suspend fun applyLicense(license: String, strategies: List<Strategy>, allowProtected: Boolean,
         progress: (Int, Int, Strategy) -> Unit): WarpAccountType {
         if (!registered && !settings().tosAccepted) throw ZarpException(Msg("err.tos"))
+        foreignVpnRoute()?.let { return manager(it, viaVpn = true).apply(license, emptyList(), false) }
         return manager.apply(license, strategies, allowProtected, progress)
     }
 
@@ -63,7 +75,7 @@ class MasqueAccount(
         File(configFile.path + ".pending").delete()
     }
 
-    internal class NativeSession(private val op: AccountOperation) : WarpAccountSession {
+    internal class NativeSession(private val op: AccountOperation, private val viaVpn: Boolean = false) : WarpAccountSession {
         override suspend fun ensureRegistered() = call { op.ensureRegistered("Zarp Android") }
         override suspend fun read() = WarpAccountType.parse(call { op.readAccount() })
         override suspend fun apply(license: String) = WarpAccountType.parse(call { op.applyLicense(license) })
@@ -76,10 +88,16 @@ class MasqueAccount(
                     val result = block()
                     if (continuation.isActive) continuation.resume(result)
                 } catch (e: Exception) {
-                    // gomobile wraps error text; accept only an exact known suffix.
-                    val code = e.message.orEmpty().substringAfterLast("account:")
-                    val safe = code.takeIf { it in setOf("network", "timeout", "rateLimit", "rejected", "invalid", "missing", "config") } ?: "api"
-                    if (continuation.isActive) continuation.resumeWithException(WarpAccountException(safe))
+                    // gomobile wraps error text; only use known codes and numeric HTTP status.
+                    val fields = e.message.orEmpty().substringAfterLast("account:").split(':')
+                    val code = when (fields.first()) {
+                        "network", "timeout", "rateLimit", "rejected", "invalid", "missing", "config" -> fields.first()
+                        "protect" -> if (viaVpn) "vpnUnavailable" else "network"
+                        else -> "api"
+                    }
+                    val stage = fields.getOrNull(1)?.takeIf { it in setOf("register", "enroll", "dns", "tcp", "tls", "save") }
+                    val status = fields.getOrNull(2)?.toIntOrNull()?.takeIf { it in 100..599 }
+                    if (continuation.isActive) continuation.resumeWithException(WarpAccountException(code, stage, status))
                 }
             }
         }

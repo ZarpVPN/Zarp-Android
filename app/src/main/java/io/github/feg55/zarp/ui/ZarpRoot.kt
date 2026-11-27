@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -31,6 +32,11 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.feg55.zarp.core.EngineState
 import io.github.feg55.zarp.core.L
+import io.github.feg55.zarp.core.Msg
+import io.github.feg55.zarp.core.WarpAccountException
+import io.github.feg55.zarp.core.ZarpException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 private enum class Tab(val key: String, val icon: ImageVector) {
     Home("tab.home", Icons.Outlined.Home),
@@ -40,8 +46,7 @@ private enum class Tab(val key: String, val icon: ImageVector) {
 }
 
 /**
- * Root of the UI. [withVpnPermission] runs an engine action after the VPN
- * permission is granted; actions also wait for the WARP Terms of Service consent.
+ * First-time WARP registration runs before requesting permission for Zarp's VPN.
  */
 @Composable
 fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
@@ -53,16 +58,38 @@ fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
     var pendingTos by remember { mutableStateOf<(() -> Unit)?>(null) }
     var otherVpn by remember { mutableStateOf(false) }
     var pendingOtherVpn by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var registeredViaVpn by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
-    // engine action -> ToS consent (registration) -> VPN permission -> action
-    val guarded: (() -> Unit) -> Unit = { action ->
+    fun connectWithPermission(action: () -> Unit) {
         val run = { withVpnPermission(action) }
-        val consent = {
-            if (settings?.useProxy == true || settings?.tosAccepted == true || vm.accountRegistered) run() else pendingTos = run
-        }
         if (vm.foreignVpnActive()) {
-            if (settings?.useProxy == true) otherVpn = true else pendingOtherVpn = consent
-        } else consent()
+            if (settings?.useProxy == true) otherVpn = true else pendingOtherVpn = run
+        } else run()
+    }
+
+    fun register(viaVpn: Boolean, action: (() -> Unit)? = null) {
+        scope.launch {
+            try {
+                vm.engine.registerWarp(viaVpn)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                vm.registrationFailure = e as? ZarpException ?: ZarpException(Msg("detail.registerFailed"))
+                return@launch
+            }
+            if (viaVpn) registeredViaVpn = true
+            else action?.let(::connectWithPermission)
+        }
+    }
+
+    fun withWarpConsent(next: () -> Unit) {
+        if (settings?.tosAccepted == true || vm.accountRegistered) next() else pendingTos = next
+    }
+
+    val guarded: (() -> Unit) -> Unit = { action ->
+        if (settings?.useProxy == true || vm.accountRegistered) connectWithPermission(action)
+        else withWarpConsent { register(vm.foreignVpnActive(), action) }
     }
 
     // auto-connect once per process start, only when nothing needs the user's answer
@@ -71,7 +98,7 @@ fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
         val s = settings ?: return@LaunchedEffect
         if (!autoTried && s.autoConnect && status.state == EngineState.Idle && (s.useProxy || s.tosAccepted || vm.accountRegistered)) {
             autoTried = true
-            if (!vm.foreignVpnActive()) withVpnPermission { vm.connect() }
+            if (!vm.foreignVpnActive()) guarded { vm.connect() }
         }
     }
 
@@ -106,9 +133,8 @@ fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
                 text = { Text(L.t("tos.text"), fontSize = 15.sp) },
                 confirmButton = {
                     TextButton(onClick = {
-                        vm.updateSettings { it.copy(tosAccepted = true) }
                         pendingTos = null
-                        next()
+                        scope.launch { vm.acceptWarpTos(); next() }
                     }) { Text(L.t("tos.accept"), color = Zc.Accent) }
                 },
                 dismissButton = {
@@ -116,6 +142,37 @@ fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
                 },
             )
         }
+        vm.registrationFailure?.let { failure ->
+            val accountFailure = failure as? WarpAccountException
+            val retry = accountFailure?.canRetryViaVpn == true
+            AlertDialog(
+                onDismissRequest = { vm.registrationFailure = null },
+                title = { Text(L.t("detail.registerFailed")) },
+                text = {
+                    Text(if (retry && accountFailure?.code != "vpnUnavailable") {
+                        L.t("warpRegistration.retryHint", failure.msg)
+                    } else failure.msg.toString())
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        if (!retry) vm.registrationFailure = null
+                        else if (vm.foreignVpnActive()) {
+                            vm.registrationFailure = null
+                            register(viaVpn = true)
+                        } else vm.registrationFailure = WarpAccountException("vpnUnavailable")
+                    }) { Text(L.t(if (retry) "warpRegistration.retry" else "btn.back")) }
+                },
+                dismissButton = if (retry) {
+                    { TextButton(onClick = { vm.registrationFailure = null }) { Text(L.t("btn.cancel")) } }
+                } else null,
+            )
+        }
+        if (registeredViaVpn) AlertDialog(
+            onDismissRequest = { registeredViaVpn = false },
+            title = { Text(L.t("log.warpRegistered")) },
+            text = { Text(L.t("warpRegistration.registeredViaVpn")) },
+            confirmButton = { TextButton(onClick = { registeredViaVpn = false }) { Text(L.t("btn.back")) } },
+        )
 
         Scaffold(
             containerColor = Zc.Back,
@@ -144,7 +201,9 @@ fun ZarpRoot(vm: MainViewModel, withVpnPermission: (() -> Unit) -> Unit) {
                 Tab.Home -> HomeScreen(vm, guarded, m)
                 Tab.Strategies -> StrategiesScreen(vm, guarded, m)
                 Tab.Logs -> LogsScreen(vm, m)
-                Tab.Settings -> SettingsScreen(vm, m)
+                Tab.Settings -> SettingsScreen(vm, m, registerWarp = {
+                    withWarpConsent { register(vm.foreignVpnActive()) }
+                })
             }
         }
       }

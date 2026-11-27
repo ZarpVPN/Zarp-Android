@@ -13,16 +13,38 @@ enum class WarpAccountType(val key: String) {
 }
 
 /** Safe native error classes. Native diagnostics never reach settings or logs. */
-class WarpAccountException(val code: String) : ZarpException(Msg(when (code) {
-    "invalid" -> "warpPlus.invalid"
-    "missing" -> "warpPlus.noWarp"
-    "timeout" -> "warpPlus.timeout"
-    "rateLimit" -> "warpPlus.rateLimit"
-    "rejected" -> "warpPlus.rejected"
-    "config" -> "warpPlus.storageFailed"
-    else -> "warpPlus.accountFailed"
-})) {
+class WarpAccountException(
+    val code: String,
+    val stage: String? = null,
+    val httpStatus: Int? = null,
+) : ZarpException(accountMessage(code, stage, httpStatus)) {
     val retryable: Boolean get() = code == "network" || code == "timeout"
+    val canRetryViaVpn: Boolean get() = retryable || httpStatus == 403 || code == "vpnUnavailable"
+}
+
+private fun accountMessage(code: String, stage: String?, httpStatus: Int?): Msg {
+    val reason = Msg(when (code) {
+        "invalid" -> "warpPlus.invalid"
+        "missing" -> "warpPlus.noWarp"
+        "timeout" -> if (stage == null) "warpPlus.timeout" else "warpRegistration.timeout"
+        "rateLimit" -> "warpPlus.rateLimit"
+        "rejected" -> if (stage == null) "warpPlus.rejected" else "warpRegistration.rejected"
+        "config" -> "warpPlus.storageFailed"
+        "vpnUnavailable" -> "warpRegistration.vpnUnavailable"
+        "network" -> if (stage == null) "warpPlus.accountFailed" else "warpRegistration.network"
+        else -> if (stage == null) "warpPlus.accountFailed" else "detail.registerFailed"
+    })
+    val step = when (stage) {
+        "register" -> "warpRegistration.create"
+        "enroll" -> "warpRegistration.enroll"
+        "dns" -> "warpRegistration.dns"
+        "tcp" -> "warpRegistration.tcp"
+        "tls" -> "warpRegistration.tls"
+        "save" -> "warpRegistration.save"
+        else -> return reason
+    }
+    return if (httpStatus == null) Msg("warpRegistration.failure", Msg(step), reason)
+    else Msg("warpRegistration.httpFailure", Msg(step), httpStatus, reason)
 }
 
 /** A private API transport with one strategy. Closing also cancels active requests. */
@@ -76,7 +98,10 @@ class WarpAccountManager(
         val direct = sessions.open(null)
         try {
             try { direct.ensureRegistered() }
-            catch (e: WarpAccountException) { registrationFailure = e }
+            catch (e: WarpAccountException) {
+                log.write(L.t("log.warpRegistrationAttemptFailed", e.msg))
+                registrationFailure = e
+            }
             if (registrationFailure == null) return after(direct)
         } finally { direct.close() }
         val original = registrationFailure
@@ -93,6 +118,7 @@ class WarpAccountManager(
             try {
                 try { session.ensureRegistered() }
                 catch (e: WarpAccountException) {
+                    log.write(L.t("log.warpRegistrationAttemptFailed", e.msg))
                     last = e
                     if (!e.retryable) throw e
                     continue

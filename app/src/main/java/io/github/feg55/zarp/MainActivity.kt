@@ -20,10 +20,10 @@ class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
     private var afterVpnPermission: (() -> Unit)? = null
 
-    private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+    private val vpnPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val action = afterVpnPermission
         afterVpnPermission = null
-        if (VpnService.prepare(this) == null) {
+        if (result.resultCode == RESULT_OK && VpnService.prepare(this) == null) {
             action?.invoke()
         } else {
             vm.log.write(L.t("log.vpnPermission"))
@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Scans end with connecting, so every engine action needs the VPN permission first. */
+    /** Connection and scan actions can start Zarp's VPN. */
     private fun withVpnPermission(action: () -> Unit) {
         val intent = VpnService.prepare(this)
         if (intent == null) {

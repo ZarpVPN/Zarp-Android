@@ -70,7 +70,7 @@ func TestAccountRegistrationResumesEnrollmentAndPreservesIdentity(t *testing.T) 
 		json.NewEncoder(w).Encode(enrolledAccount())
 	}
 	op := testAccountOperation(t, path, handler)
-	if err := op.EnsureRegistered("Zarp test"); err == nil || err.Error() != "account:network" {
+	if err := op.EnsureRegistered("Zarp test"); err == nil || err.Error() != "account:network:enroll:503" {
 		t.Fatalf("first: %v", err)
 	}
 	if HasAccount(path) {
@@ -98,6 +98,48 @@ func TestAccountRegistrationResumesEnrollmentAndPreservesIdentity(t *testing.T) 
 	after, _ := os.ReadFile(path)
 	if !bytes.Equal(before, after) || registrations.Load() != 1 || enrollments.Load() != 2 {
 		t.Fatal("existing registration changed")
+	}
+}
+
+func TestAccountRegistrationReplacesRevokedPendingIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "account.json")
+	var registrations atomic.Int32
+	var revoked atomic.Bool
+	op := testAccountOperation(t, path, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost:
+			id := "revoked-device"
+			if registrations.Add(1) == 2 {
+				id = "device-test"
+			}
+			json.NewEncoder(w).Encode(models.AccountData{ID: id, Token: "private-token"})
+		case r.Method == http.MethodPatch && r.URL.Path == "/reg/revoked-device":
+			if revoked.Load() {
+				w.WriteHeader(http.StatusNotFound)
+			} else {
+				w.WriteHeader(http.StatusForbidden)
+			}
+		case r.Method == http.MethodPatch && r.URL.Path == "/reg/device-test":
+			json.NewEncoder(w).Encode(enrolledAccount())
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+	for range 2 {
+		if err := op.EnsureRegistered("Zarp test"); err == nil || err.Error() != "account:rejected:enroll:403" {
+			t.Fatalf("enrollment rejection: %v", err)
+		}
+	}
+	if registrations.Load() != 1 {
+		t.Fatal("403 discarded the pending identity")
+	}
+	revoked.Store(true)
+	if err := op.EnsureRegistered("Zarp test"); err != nil {
+		t.Fatal(err)
+	}
+	if registrations.Load() != 2 || !HasAccount(path) {
+		t.Fatal("revoked identity was not replaced exactly once")
 	}
 }
 
@@ -160,7 +202,7 @@ func TestAccountCancellationAndSafeErrors(t *testing.T) {
 	op.Close()
 	select {
 	case err := <-done:
-		if err == nil || err.Error() != "account:cancelled" {
+		if err == nil || err.Error() != "account:cancelled:register" {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):

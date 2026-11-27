@@ -4,7 +4,9 @@ import android.app.Application
 import android.content.Context
 import android.content.res.Configuration
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.content.edit
 import io.github.feg55.zarp.core.L
@@ -19,9 +21,11 @@ import kotlinx.coroutines.Job
 import io.github.feg55.zarp.masque.MasqueAccount
 import io.github.feg55.zarp.masque.MasqueTunnelFactory
 import io.github.feg55.zarp.masque.ProxyTunnelFactory
+import io.github.feg55.zarp.masque.SocketProtector
 import io.github.feg55.zarp.net.TraceClient
 import io.github.feg55.zarp.strategy.BlobStore
 import io.github.feg55.zarp.vpn.VpnServiceController
+import io.github.feg55.zarp.vpn.ZarpVpnService
 import io.github.feg55.zarpcore.Zarpcore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -76,7 +80,8 @@ class ZarpApp : Application() {
         val settings = suspend { store.settings() }
         val warpConfig = File(filesDir, "warp-masque.json")
         val vpn = VpnServiceController(this, settings)
-        account = MasqueAccount(warpConfig, settings, log, vpn)
+        val network = AndroidNetworkInspector(this)
+        account = MasqueAccount(warpConfig, settings, log, vpn, network::foreignVpnRoute)
         servers = ServerRepository(settings, { transform -> store.updateSettings(transform) }, log = log)
         engine = ZarpEngine(
             scope = appScope,
@@ -91,7 +96,7 @@ class ZarpApp : Application() {
             probe = TraceClient(),
             vpn = vpn,
             account = account,
-            network = AndroidNetworkInspector(this),
+            network = network,
             log = log,
             refreshServers = servers::ensure,
             capabilities = object : io.github.feg55.zarp.core.StrategyCapabilities {
@@ -115,10 +120,21 @@ class ZarpApp : Application() {
 class AndroidNetworkInspector(context: Context) : NetworkInspector {
     private val cm = context.getSystemService(ConnectivityManager::class.java)
 
-    override fun foreignVpnActive(): Boolean {
-        if (io.github.feg55.zarp.vpn.ZarpVpnService.instance != null) return false
-        val active = cm.activeNetwork ?: return false
-        return cm.getNetworkCapabilities(active)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true
+    private fun foreignVpn(): Network? {
+        if (ZarpVpnService.instance != null) return null
+        return cm.activeNetwork?.takeIf { cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true }
+    }
+
+    override fun foreignVpnActive() = foreignVpn() != null
+
+    fun foreignVpnRoute(): SocketProtector? {
+        val network = foreignVpn() ?: return null
+        return SocketProtector { fd ->
+            foreignVpn() == network && runCatching {
+                // Duplicate the descriptor so closing it leaves the Go socket open.
+                ParcelFileDescriptor.fromFd(fd).use { network.bindSocket(it.fileDescriptor) }
+            }.isSuccess
+        }
     }
 
     override fun internetAvailable(): Boolean {
